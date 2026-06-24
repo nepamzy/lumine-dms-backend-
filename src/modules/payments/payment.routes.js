@@ -1,0 +1,13 @@
+const express = require("express");
+const router = express.Router();
+const { authenticate, authorize } = require("../../middleware/auth.middleware");
+const { initializeHandler, verifyHandler } = require("./payment.controller");
+
+router.post("/initialize", authenticate, authorize("customer"), initializeHandler);
+router.get("/verify/:reference", authenticate, verifyHandler);
+
+// Note: POST /webhook is intentionally NOT here — it's mounted directly in
+// app.js with express.raw() before the global JSON parser, since Paystack's
+// signature verification requires the exact raw request bytes.
+
+module.exports = router;
