@@ -16,6 +16,7 @@ const { webhookHandler } = require("./modules/payments/payment.controller");
 const { errorHandler, notFound } = require("./middleware/error.middleware");
 
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(helmet());
 app.use(
