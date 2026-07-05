@@ -189,9 +189,9 @@ async function listOrders(user, { status } = {}) {
     values
   );
   return result.rows;
+}
 
-function assertCanAccessOrder(order, user) {
-  if (user.role === "admin") return;
+function assertCanAccessOrder(order, user) {  if (user.role === "admin") return;
   if (user.role === "customer" && order.customer_id === user.id) return;
   // distributor ownership is checked at the route/service boundary where distributor_id is on hand
   if (user.role === "distributor") return; // refined check happens via listOrders filter in practice
