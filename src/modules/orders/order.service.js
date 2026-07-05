@@ -164,28 +164,31 @@ async function listOrders(user, { status } = {}) {
   let i = 1;
 
   if (user.role === "customer") {
-    conditions.push(`customer_id = $${i++}`);
+    conditions.push(`o.customer_id = $${i++}`);
     values.push(user.id);
   } else if (user.role === "distributor") {
     const distResult = await db.query("SELECT id FROM distributors WHERE user_id = $1", [user.id]);
     if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
-    conditions.push(`distributor_id = $${i++}`);
+    conditions.push(`o.distributor_id = $${i++}`);
     values.push(distResult.rows[0].id);
   }
   // admin: no filter, sees everything
 
   if (status) {
-    conditions.push(`status = $${i++}`);
+    conditions.push(`o.status = $${i++}`);
     values.push(status);
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await db.query(
-    `SELECT * FROM orders ${where} ORDER BY created_at DESC`,
+    `SELECT o.*, u.full_name AS customer_name, u.state AS customer_state
+     FROM orders o
+     JOIN users u ON u.id = o.customer_id
+     ${where}
+     ORDER BY o.created_at DESC`,
     values
   );
   return result.rows;
-}
 
 function assertCanAccessOrder(order, user) {
   if (user.role === "admin") return;
