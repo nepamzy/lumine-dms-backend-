@@ -53,34 +53,50 @@ async function createOrder(customerId, items) {
     let totalAmount = 0;
     const orderItemRows = []; // { productId, batchId, quantity, unitPrice }
 
-    for (const item of items) {
-      if (!item.productId || !item.quantity || item.quantity <= 0) {
-        throw new ApiError(400, "Each item needs a valid productId and quantity > 0");
+for (const item of items) {
+      if (!item.variantId || !item.quantity || item.quantity <= 0) {
+        throw new ApiError(400, "Each item needs a valid variantId and quantity > 0");
       }
 
-      const productResult = await client.query(
-        "SELECT id, unit_price, is_active FROM products WHERE id = $1",
-        [item.productId]
+      const variantResult = await client.query(
+        `SELECT v.id AS variant_id, v.product_id, p.is_active
+         FROM product_variants v
+         JOIN products p ON p.id = v.product_id
+         WHERE v.id = $1`,
+        [item.variantId]
       );
-      if (productResult.rows.length === 0) {
-        throw new ApiError(404, `Product ${item.productId} not found`);
+      if (variantResult.rows.length === 0) {
+        throw new ApiError(404, `Variant ${item.variantId} not found`);
       }
-      const product = productResult.rows[0];
-      if (!product.is_active) {
-        throw new ApiError(400, `Product ${item.productId} is no longer available`);
+      const variant = variantResult.rows[0];
+      if (!variant.is_active) {
+        throw new ApiError(400, `This product is no longer available`);
       }
 
-      // FEFO reservation — may split across multiple batches if needed
-      const allocations = await reserveStockFEFO(client, item.productId, item.quantity);
+      // Resolve the correct tiered price for the requested quantity
+      const tierResult = await client.query(
+        `SELECT price FROM price_tiers
+         WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
+         ORDER BY min_qty DESC LIMIT 1`,
+        [item.variantId, item.quantity]
+      );
+      if (tierResult.rows.length === 0) {
+        throw new ApiError(400, `No price tier found for this quantity`);
+      }
+      const unitPrice = Number(tierResult.rows[0].price);
+
+      // FEFO reservation ΓÇö may split across multiple batches if needed
+      const allocations = await reserveStockFEFO(client, variant.product_id, item.quantity);
 
       for (const allocation of allocations) {
         orderItemRows.push({
-          productId: item.productId,
+          productId: variant.product_id,
+          variantId: item.variantId,
           batchId: allocation.batchId,
           quantity: allocation.quantity,
-          unitPrice: product.unit_price,
+          unitPrice,
         });
-        totalAmount += allocation.quantity * Number(product.unit_price);
+        totalAmount += allocation.quantity * unitPrice;
       }
     }
 
@@ -94,14 +110,13 @@ async function createOrder(customerId, items) {
     );
     const order = orderResult.rows[0];
 
-    for (const row of orderItemRows) {
+   for (const row of orderItemRows) {
       await client.query(
-        `INSERT INTO order_items (order_id, product_id, batch_id, quantity, unit_price)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [order.id, row.productId, row.batchId, row.quantity, row.unitPrice]
+        `INSERT INTO order_items (order_id, product_id, variant_id, batch_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [order.id, row.productId, row.variantId, row.batchId, row.quantity, row.unitPrice]
       );
     }
-
     await client.query("COMMIT");
     const fullOrder = await getOrderById(order.id);
 
@@ -130,10 +145,11 @@ async function getOrderById(id) {
   if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
 
   const itemsResult = await db.query(
-    `SELECT oi.*, p.name AS product_name, p.sku, b.batch_number, b.expiry_date
+    `SELECT oi.*, p.name AS product_name, p.sku, b.batch_number, b.expiry_date, v.size AS variant_size
      FROM order_items oi
      JOIN products p ON p.id = oi.product_id
      JOIN product_batches b ON b.id = oi.batch_id
+     LEFT JOIN product_variants v ON v.id = oi.variant_id
      WHERE oi.order_id = $1`,
     [id]
   );

@@ -1,0 +1,1 @@
+ALTER TABLE order_items ADD COLUMN variant_id UUID REFERENCES product_variants(id);
