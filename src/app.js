@@ -12,6 +12,7 @@ const deliveryRoutes = require("./modules/deliveries/delivery.routes");
 const reportRoutes = require("./modules/reports/report.routes");
 const notificationRoutes = require("./modules/notifications/notification.routes");
 const distributorRoutes = require("./modules/distributors/distributor.routes");
+const customerRoutes = require("./modules/customers/customer.routes");
 const { webhookHandler } = require("./modules/payments/payment.controller");
 const { errorHandler, notFound } = require("./middleware/error.middleware");
 
@@ -56,6 +57,7 @@ app.use("/api/deliveries", deliveryRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/admin/distributors", distributorRoutes);
+app.use("/api/admin/customers", customerRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
