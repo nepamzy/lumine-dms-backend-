@@ -14,15 +14,13 @@ function setRefreshCookie(res, token) {
 }
 
 const registerHandler = asyncHandler(async (req, res) => {
-  const { fullName, email, phone, password, role, state, ...extra } = req.body;
-
+  const { fullName, email, phone, password, role, state, latitude, longitude, ...extra } = req.body;
   if (!fullName || !email || !phone || !password || !role || !state) {
     throw new ApiError(400, "Missing required fields");
   }
   if (password.length < 8) {
     throw new ApiError(400, "Password must be at least 8 characters");
   }
-
   const user = await authService.register({
     fullName,
     email,
@@ -30,6 +28,8 @@ const registerHandler = asyncHandler(async (req, res) => {
     password,
     role,
     state,
+    latitude,
+    longitude,
     extra,
   });
 

@@ -9,7 +9,7 @@ const {
 
 const SALT_ROUNDS = 12;
 
-async function register({ fullName, email, phone, password, role, state, extra = {} }) {
+async function register({ fullName, email, phone, password, role, state, latitude, longitude, extra = {} }) {
   if (!["customer", "distributor"].includes(role)) {
     // Admins are created directly in the database / by another admin, never via public signup
     throw new ApiError(400, "Invalid role for self-registration");
@@ -29,9 +29,9 @@ async function register({ fullName, email, phone, password, role, state, extra =
   try {
     await client.query("BEGIN");
 
-    const userResult = await client.query(
-      `INSERT INTO users (full_name, email, phone, password_hash, role, state, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+   const userResult = await client.query(
+      `INSERT INTO users (full_name, email, phone, password_hash, role, state, status, latitude, longitude, location_captured_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id, full_name, email, phone, role, state, status, created_at`,
       [
         fullName,
@@ -41,6 +41,9 @@ async function register({ fullName, email, phone, password, role, state, extra =
         role,
         state,
         role === "distributor" ? "pending" : "active", // distributors need approval
+        latitude || null,
+        longitude || null,
+        latitude && longitude ? new Date() : null,
       ]
     );
     const user = userResult.rows[0];
