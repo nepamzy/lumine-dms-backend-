@@ -133,6 +133,67 @@ async function reserveStockFEFO(client, productId, quantityNeeded) {
   return allocations;
 }
 
+async function getVariantsWithTiers(productId) {
+  const variants = await db.query(
+    `SELECT * FROM product_variants WHERE product_id = $1 ORDER BY size`,
+    [productId]
+  );
+  for (const variant of variants.rows) {
+    const tiers = await db.query(
+      `SELECT min_qty, max_qty, price FROM price_tiers WHERE variant_id = $1 ORDER BY min_qty ASC`,
+      [variant.id]
+    );
+    variant.priceTiers = tiers.rows;
+  }
+  return variants.rows;
+}
+
+async function createVariant(productId, { size, sku, imageUrl, tiers }) {
+  if (!size || !tiers || !Array.isArray(tiers) || tiers.length === 0) {
+    throw new ApiError(400, "size and at least one price tier are required");
+  }
+
+  const product = await db.query("SELECT id FROM products WHERE id = $1", [productId]);
+  if (product.rows.length === 0) throw new ApiError(404, "Product not found");
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const variantResult = await client.query(
+      `INSERT INTO product_variants (product_id, size, sku, image_url) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [productId, size, sku || null, imageUrl || null]
+    );
+    const variant = variantResult.rows[0];
+
+    for (const tier of tiers) {
+      if (tier.minQty === undefined || tier.price === undefined) {
+        throw new ApiError(400, "Each tier needs minQty and price");
+      }
+      await client.query(
+        `INSERT INTO price_tiers (variant_id, min_qty, max_qty, price) VALUES ($1, $2, $3, $4)`,
+        [variant.id, tier.minQty, tier.maxQty ?? null, tier.price]
+      );
+    }
+    await client.query("COMMIT");
+    return variant;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Given a variant and desired quantity, finds the matching price tier
+function resolveTierPrice(tiers, quantity) {
+  for (const tier of tiers) {
+    if (quantity >= tier.min_qty && (tier.max_qty === null || quantity <= tier.max_qty)) {
+      return tier.price;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   listProducts,
   getProductById,
@@ -141,4 +202,7 @@ module.exports = {
   addBatch,
   getExpiringBatches,
   reserveStockFEFO,
+  getVariantsWithTiers,
+  createVariant,
+  resolveTierPrice,
 };

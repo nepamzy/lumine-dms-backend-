@@ -8,12 +8,16 @@ const {
   updateHandler,
   addBatchHandler,
   expiringHandler,
+  getVariantsHandler,
+  createVariantHandler,
 } = require("./product.controller");
 
 // Public catalog browsing (customers don't need to be logged in to view)
 router.get("/", listHandler);
 router.get("/expiring", authenticate, authorize("admin"), expiringHandler);
 router.get("/:id", getOneHandler);
+router.get("/:id/variants", getVariantsHandler);
+router.post("/:id/variants", authenticate, authorize("admin"), createVariantHandler);
 
 // Admin-only catalog management
 router.post("/", authenticate, authorize("admin"), createHandler);

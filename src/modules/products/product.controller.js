@@ -40,6 +40,16 @@ const expiringHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: batches });
 });
 
+const getVariantsHandler = asyncHandler(async (req, res) => {
+  const variants = await productService.getVariantsWithTiers(req.params.id);
+  res.json({ success: true, data: variants });
+});
+
+const createVariantHandler = asyncHandler(async (req, res) => {
+  const { size, sku, imageUrl, tiers } = req.body;
+  const variant = await productService.createVariant(req.params.id, { size, sku, imageUrl, tiers });
+  res.status(201).json({ success: true, data: variant });
+});
 module.exports = {
   listHandler,
   getOneHandler,
@@ -47,4 +57,6 @@ module.exports = {
   updateHandler,
   addBatchHandler,
   expiringHandler,
+  getVariantsHandler,
+  createVariantHandler,
 };
