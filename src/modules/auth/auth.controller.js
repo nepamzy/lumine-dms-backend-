@@ -76,10 +76,25 @@ const meHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: user });
 });
 
+const updateProfileHandler = asyncHandler(async (req, res) => {
+  const user = await authService.updateProfile(req.user.id, req.body);
+  res.json({ success: true, data: user });
+});
+
+const changePasswordHandler = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    throw new ApiError(400, "Current and new password are required");
+  }
+  await authService.changePassword(req.user.id, currentPassword, newPassword);
+  res.json({ success: true, message: "Password changed successfully" });
+});
 module.exports = {
   registerHandler,
   loginHandler,
   refreshHandler,
   logoutHandler,
   meHandler,
+  updateProfileHandler,
+  changePasswordHandler,
 };

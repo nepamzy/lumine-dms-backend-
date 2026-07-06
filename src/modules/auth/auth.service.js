@@ -142,5 +142,75 @@ async function getCurrentUser(userId) {
   if (result.rows.length === 0) throw new ApiError(404, "User not found");
   return result.rows[0];
 }
+async function updateProfile(userId, updates) {
+  const allowedUserFields = ["full_name", "phone", "state"];
+  const fields = [];
+  const values = [];
+  let i = 1;
 
-module.exports = { register, login, refresh, logout, getCurrentUser };
+  for (const [key, value] of Object.entries(updates)) {
+    const column = key.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase());
+    if (allowedUserFields.includes(column) && value !== undefined) {
+      fields.push(`${column} = $${i}`);
+      values.push(value);
+      i++;
+    }
+  }
+
+  if (fields.length > 0) {
+    values.push(userId);
+    await db.query(`UPDATE users SET ${fields.join(", ")} WHERE id = $${i}`, values);
+  }
+
+  // Business-specific fields live in customer_profiles / distributors,
+  // update those too if provided.
+  if (updates.businessName !== undefined || updates.deliveryAddress !== undefined || updates.customerType !== undefined) {
+    const cpFields = [];
+    const cpValues = [];
+    let j = 1;
+    if (updates.businessName !== undefined) {
+      cpFields.push(`business_name = $${j++}`);
+      cpValues.push(updates.businessName);
+    }
+    if (updates.deliveryAddress !== undefined) {
+      cpFields.push(`delivery_address = $${j++}`);
+      cpValues.push(updates.deliveryAddress);
+    }
+    if (updates.customerType !== undefined) {
+      cpFields.push(`customer_type = $${j++}`);
+      cpValues.push(updates.customerType);
+    }
+    if (cpFields.length > 0) {
+      cpValues.push(userId);
+      await db.query(
+        `UPDATE customer_profiles SET ${cpFields.join(", ")} WHERE user_id = $${j}`,
+        cpValues
+      );
+    }
+  }
+
+  if (updates.businessName !== undefined) {
+    await db.query(
+      `UPDATE distributors SET business_name = $1 WHERE user_id = $2`,
+      [updates.businessName, userId]
+    );
+  }
+
+  return getCurrentUser(userId);
+}
+
+async function changePassword(userId, currentPassword, newPassword) {
+  if (!newPassword || newPassword.length < 8) {
+    throw new ApiError(400, "New password must be at least 8 characters");
+  }
+
+  const result = await db.query("SELECT password_hash FROM users WHERE id = $1", [userId]);
+  if (result.rows.length === 0) throw new ApiError(404, "User not found");
+
+  const matches = await bcrypt.compare(currentPassword, result.rows[0].password_hash);
+  if (!matches) throw new ApiError(401, "Current password is incorrect");
+
+  const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [newHash, userId]);
+}
+module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword };
