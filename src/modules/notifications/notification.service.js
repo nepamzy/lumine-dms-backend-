@@ -80,6 +80,14 @@ async function notifyDistributorAssigned(orderNumber, distributorUserId) {
     message: `New order ${orderNumber} has been assigned to you on Lumine DMS.`,
   });
 }
+async function notifyDistributorApproved(distributorUserId) {
+  return notify({
+    userId: distributorUserId,
+    type: "distributor_approved",
+    channel: "email",
+    message: `Congratulations! Your Lumine distributor account has been approved. You can now log in and start managing deliveries.`,
+  });
+}
 
 async function listForUser(userId) {
   const result = await db.query(
@@ -96,5 +104,6 @@ module.exports = {
   notifyOutForDelivery,
   notifyDelivered,
   notifyDistributorAssigned,
+  notifyDistributorApproved,
   listForUser,
 };

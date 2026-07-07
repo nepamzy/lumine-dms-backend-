@@ -1,5 +1,6 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
+const { notifyDistributorApproved } = require("../notifications/notification.service");
 
 async function listDistributors({ status } = {}) {
   const params = [];
@@ -41,6 +42,9 @@ async function approveDistributor(distributorId, territoryId) {
     );
 
     await client.query("COMMIT");
+
+    notifyDistributorApproved(distResult.rows[0].user_id).catch(() => {});
+
     return distResult.rows[0];
   } catch (err) {
     await client.query("ROLLBACK");
@@ -49,7 +53,7 @@ async function approveDistributor(distributorId, territoryId) {
     client.release();
   }
 }
-
+async function rejectDistributor(distributorId) {
 async function rejectDistributor(distributorId) {
   const result = await db.query(
     `UPDATE distributors SET approval_status = 'rejected' WHERE id = $1 RETURNING *`,
