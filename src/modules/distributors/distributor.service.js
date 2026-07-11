@@ -54,7 +54,6 @@ async function approveDistributor(distributorId, territoryId) {
   }
 }
 async function rejectDistributor(distributorId) {
-async function rejectDistributor(distributorId) {
   const result = await db.query(
     `UPDATE distributors SET approval_status = 'rejected' WHERE id = $1 RETURNING *`,
     [distributorId]
