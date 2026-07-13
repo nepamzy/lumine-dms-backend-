@@ -4,6 +4,18 @@ const { authenticate, authorize } = require("../../middleware/auth.middleware");
 const asyncHandler = require("../../utils/asyncHandler");
 const service = require("./distributor.service");
 
+// Distributor-facing: view their own referral code/link + referred customers.
+// Must come before the admin-only `router.use` below.
+router.get(
+  "/me/referral",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const info = await service.getReferralInfo(req.user.id);
+    res.json({ success: true, data: info });
+  })
+);
+
 router.use(authenticate, authorize("admin"));
 
 router.get(

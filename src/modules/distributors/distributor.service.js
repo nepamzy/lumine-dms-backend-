@@ -99,6 +99,33 @@ async function createTerritory({ name, state }) {
   return result.rows[0];
 }
 
+// Distributor's own referral code, plus counts of customers referred through
+// it vs. currently assigned to them (these can differ after an admin
+// reassignment — referred_by never changes, assigned_distributor_id can).
+async function getReferralInfo(userId) {
+  const distResult = await db.query(
+    `SELECT id, referral_code, business_name FROM distributors WHERE user_id = $1`,
+    [userId]
+  );
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
+  const distributor = distResult.rows[0];
+
+  const counts = await db.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE referred_by_distributor_id = $1) AS referred_count,
+       COUNT(*) FILTER (WHERE assigned_distributor_id = $1) AS assigned_count
+     FROM customer_profiles`,
+    [distributor.id]
+  );
+
+  return {
+    referralCode: distributor.referral_code,
+    businessName: distributor.business_name,
+    referredCount: Number(counts.rows[0].referred_count),
+    assignedCount: Number(counts.rows[0].assigned_count),
+  };
+}
+
 module.exports = {
   listDistributors,
   approveDistributor,
@@ -106,4 +133,5 @@ module.exports = {
   suspendDistributor,
   listTerritories,
   createTerritory,
+  getReferralInfo,
 };

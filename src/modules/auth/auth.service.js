@@ -6,10 +6,48 @@ const {
   signRefreshToken,
   verifyRefreshToken,
 } = require("../../utils/jwt");
+const { generateUniqueReferralCode } = require("../../utils/referralCode");
+
+// Finds the best distributor to auto-assign a new customer to, when they
+// didn't sign up through a specific referral link. Prefers a distributor in
+// the exact same LGA; falls back to same state if none found there. Among
+// candidates, picks whoever currently has the fewest assigned customers, to
+// spread new signups out rather than always picking the same distributor.
+async function findClosestDistributor(client, { state, localGovernment }) {
+  if (localGovernment) {
+    const sameLga = await client.query(
+      `SELECT d.id
+       FROM distributors d
+       JOIN users u ON u.id = d.user_id
+       LEFT JOIN customer_profiles cp ON cp.assigned_distributor_id = d.id
+       WHERE d.approval_status = 'approved' AND u.status = 'active'
+         AND u.state = $1 AND u.local_government = $2
+       GROUP BY d.id
+       ORDER BY COUNT(cp.id) ASC
+       LIMIT 1`,
+      [state, localGovernment]
+    );
+    if (sameLga.rows.length > 0) return sameLga.rows[0].id;
+  }
+
+  const sameState = await client.query(
+    `SELECT d.id
+     FROM distributors d
+     JOIN users u ON u.id = d.user_id
+     LEFT JOIN customer_profiles cp ON cp.assigned_distributor_id = d.id
+     WHERE d.approval_status = 'approved' AND u.status = 'active'
+       AND u.state = $1
+     GROUP BY d.id
+     ORDER BY COUNT(cp.id) ASC
+     LIMIT 1`,
+    [state]
+  );
+  return sameState.rows.length > 0 ? sameState.rows[0].id : null;
+}
 
 const SALT_ROUNDS = 12;
 
-async function register({ fullName, email, phone, password, role, state, latitude, longitude, extra = {} }) {
+async function register({ fullName, email, phone, password, role, state, latitude, longitude, localGovernment, extra = {} }) {
   if (!["customer", "distributor"].includes(role)) {
     // Admins are created directly in the database / by another admin, never via public signup
     throw new ApiError(400, "Invalid role for self-registration");
@@ -30,9 +68,9 @@ async function register({ fullName, email, phone, password, role, state, latitud
     await client.query("BEGIN");
 
    const userResult = await client.query(
-      `INSERT INTO users (full_name, email, phone, password_hash, role, state, status, latitude, longitude, location_captured_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING id, full_name, email, phone, role, state, status, created_at`,
+      `INSERT INTO users (full_name, email, phone, password_hash, role, state, local_government, status, latitude, longitude, location_captured_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id, full_name, email, phone, role, state, local_government, status, created_at`,
       [
         fullName,
         email,
@@ -40,6 +78,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
         passwordHash,
         role,
         state,
+        localGovernment || null,
         role === "distributor" ? "pending" : "active", // distributors need approval
         latitude || null,
         longitude || null,
@@ -49,16 +88,47 @@ async function register({ fullName, email, phone, password, role, state, latitud
     const user = userResult.rows[0];
 
     if (role === "distributor") {
+      const referralCode = await generateUniqueReferralCode(client, extra.businessName || fullName);
       await client.query(
-        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status)
-         VALUES ($1, $2, $3, 'pending')`,
-        [user.id, extra.territoryId || null, extra.businessName || null]
+        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code)
+         VALUES ($1, $2, $3, 'pending', $4)`,
+        [user.id, extra.territoryId || null, extra.businessName || null, referralCode]
       );
     } else if (role === "customer") {
+      // Referral link (?ref=CODE) takes priority. If the customer didn't come
+      // through one, try to auto-assign the closest distributor by LGA/state.
+      let assignedDistributorId = null;
+      let referredByDistributorId = null;
+
+      if (extra.referralCode) {
+        const referrer = await client.query(
+          `SELECT d.id
+           FROM distributors d
+           JOIN users u ON u.id = d.user_id
+           WHERE d.referral_code = $1 AND d.approval_status = 'approved' AND u.status = 'active'`,
+          [extra.referralCode]
+        );
+        if (referrer.rows.length > 0) {
+          assignedDistributorId = referrer.rows[0].id;
+          referredByDistributorId = referrer.rows[0].id;
+        }
+      }
+
+      if (!assignedDistributorId) {
+        assignedDistributorId = await findClosestDistributor(client, { state, localGovernment });
+      }
+
       await client.query(
-        `INSERT INTO customer_profiles (user_id, business_name, customer_type, delivery_address)
-         VALUES ($1, $2, $3, $4)`,
-        [user.id, extra.businessName || null, extra.customerType, extra.deliveryAddress]
+        `INSERT INTO customer_profiles (user_id, business_name, customer_type, delivery_address, assigned_distributor_id, referred_by_distributor_id)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          user.id,
+          extra.businessName || null,
+          extra.customerType,
+          extra.deliveryAddress,
+          assignedDistributorId,
+          referredByDistributorId,
+        ]
       );
     }
 
@@ -136,14 +206,22 @@ async function logout(refreshToken) {
 
 async function getCurrentUser(userId) {
   const result = await db.query(
-    `SELECT id, full_name, email, phone, role, state, status, created_at FROM users WHERE id = $1`,
+    `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.state, u.local_government, u.status, u.created_at,
+            d.id AS distributor_id, d.referral_code, d.business_name AS distributor_business_name,
+            d.approval_status,
+            cp.business_name AS customer_business_name, cp.customer_type, cp.delivery_address,
+            cp.assigned_distributor_id, cp.referred_by_distributor_id
+     FROM users u
+     LEFT JOIN distributors d ON d.user_id = u.id
+     LEFT JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.id = $1`,
     [userId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "User not found");
   return result.rows[0];
 }
 async function updateProfile(userId, updates) {
-  const allowedUserFields = ["full_name", "phone", "state"];
+  const allowedUserFields = ["full_name", "phone", "state", "local_government"];
   const fields = [];
   const values = [];
   let i = 1;

@@ -14,7 +14,7 @@ function setRefreshCookie(res, token) {
 }
 
 const registerHandler = asyncHandler(async (req, res) => {
-  const { fullName, email, phone, password, role, state, latitude, longitude, ...extra } = req.body;
+  const { fullName, email, phone, password, role, state, latitude, longitude, localGovernment, ...extra } = req.body;
   if (!fullName || !email || !phone || !password || !role || !state) {
     throw new ApiError(400, "Missing required fields");
   }
@@ -30,6 +30,7 @@ const registerHandler = asyncHandler(async (req, res) => {
     state,
     latitude,
     longitude,
+    localGovernment,
     extra,
   });
 
