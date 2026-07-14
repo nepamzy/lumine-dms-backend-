@@ -51,6 +51,14 @@ router.patch(
 );
 
 router.get(
+  "/:id/history",
+  asyncHandler(async (req, res) => {
+    const history = await service.getDistributorHistory(req.params.id);
+    res.json({ success: true, data: history });
+  })
+);
+
+router.get(
   "/territories/all",
   asyncHandler(async (req, res) => {
     const territories = await service.listTerritories();

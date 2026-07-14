@@ -13,4 +13,9 @@ const reassignDistributorHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: customer });
 });
 
-module.exports = { listHandler, reassignDistributorHandler };
+const historyHandler = asyncHandler(async (req, res) => {
+  const history = await customerService.getCustomerHistory(req.params.id);
+  res.json({ success: true, data: history });
+});
+
+module.exports = { listHandler, reassignDistributorHandler, historyHandler };
