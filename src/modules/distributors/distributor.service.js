@@ -104,7 +104,7 @@ async function createTerritory({ name, state }) {
 // reassignment — referred_by never changes, assigned_distributor_id can).
 async function getReferralInfo(userId) {
   const distResult = await db.query(
-    `SELECT id, referral_code, business_name FROM distributors WHERE user_id = $1`,
+    `SELECT id, referral_code, business_name, distributor_type FROM distributors WHERE user_id = $1`,
     [userId]
   );
   if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
@@ -121,6 +121,7 @@ async function getReferralInfo(userId) {
   return {
     referralCode: distributor.referral_code,
     businessName: distributor.business_name,
+    distributorType: distributor.distributor_type,
     referredCount: Number(counts.rows[0].referred_count),
     assignedCount: Number(counts.rows[0].assigned_count),
   };
@@ -131,7 +132,7 @@ async function getReferralInfo(userId) {
 // Used by the admin's distributor-detail view.
 async function getDistributorHistory(distributorId) {
   const profileResult = await db.query(
-    `SELECT d.id, d.business_name, d.approval_status, d.referral_code, d.created_at,
+    `SELECT d.id, d.business_name, d.approval_status, d.referral_code, d.distributor_type, d.created_at,
             u.full_name, u.email, u.phone, u.state, u.local_government, u.status AS user_status,
             t.name AS territory_name
      FROM distributors d

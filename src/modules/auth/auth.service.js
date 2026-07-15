@@ -88,11 +88,12 @@ async function register({ fullName, email, phone, password, role, state, latitud
     const user = userResult.rows[0];
 
     if (role === "distributor") {
+      const distributorType = extra.distributorType === "distributor" ? "distributor" : "sales_rep";
       const referralCode = await generateUniqueReferralCode(client, extra.businessName || fullName);
       await client.query(
-        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code)
-         VALUES ($1, $2, $3, 'pending', $4)`,
-        [user.id, extra.territoryId || null, extra.businessName || null, referralCode]
+        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code, distributor_type)
+         VALUES ($1, $2, $3, 'pending', $4, $5)`,
+        [user.id, extra.territoryId || null, extra.businessName || null, referralCode, distributorType]
       );
     } else if (role === "customer") {
       // Referral link (?ref=CODE) takes priority. If the customer didn't come
@@ -208,6 +209,7 @@ async function getCurrentUser(userId) {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.state, u.local_government, u.status, u.created_at,
             d.id AS distributor_id, d.referral_code, d.business_name AS distributor_business_name,
+            d.distributor_type,
             d.approval_status,
             cp.business_name AS customer_business_name, cp.customer_type, cp.delivery_address,
             cp.assigned_distributor_id, cp.referred_by_distributor_id
