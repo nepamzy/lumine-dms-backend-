@@ -16,7 +16,7 @@ const submitContactForm = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: errors.join(" ") });
   }
 
-  const destination = process.env.CONTACT_EMAIL || process.env.SMTP_USER;
+  const destination = process.env.CONTACT_EMAIL || process.env.BREVO_SENDER_EMAIL;
 
   await sendEmail({
     to: destination,
