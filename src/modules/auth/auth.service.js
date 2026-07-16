@@ -54,7 +54,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
   }
 
   const existing = await db.query(
-    "SELECT id FROM users WHERE email = $1 OR phone = $2",
+    "SELECT id FROM users WHERE (email = $1 OR phone = $2) AND deleted_at IS NULL",
     [email, phone]
   );
   if (existing.rows.length > 0) {
@@ -144,7 +144,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
 }
 
 async function login({ email, password }) {
-  const result = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+  const result = await db.query("SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL", [email]);
   const user = result.rows[0];
 
   if (!user) {
@@ -217,7 +217,7 @@ async function getCurrentUser(userId) {
      FROM users u
      LEFT JOIN distributors d ON d.user_id = u.id
      LEFT JOIN customer_profiles cp ON cp.user_id = u.id
-     WHERE u.id = $1`,
+     WHERE u.id = $1 AND u.deleted_at IS NULL`,
     [userId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "User not found");

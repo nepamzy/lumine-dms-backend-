@@ -39,6 +39,22 @@ router.get(
   })
 );
 
+router.get(
+  "/trash",
+  asyncHandler(async (req, res) => {
+    const trashed = await service.listTrash();
+    res.json({ success: true, data: trashed });
+  })
+);
+
+router.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    await service.removeDistributor(req.params.id);
+    res.json({ success: true, message: "Removed" });
+  })
+);
+
 router.patch(
   "/:id/approve",
   asyncHandler(async (req, res) => {

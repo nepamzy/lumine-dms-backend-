@@ -3,7 +3,7 @@ const ApiError = require("../../utils/ApiError");
 const { notifyDistributorApproved } = require("../notifications/notification.service");
 
 async function listDistributors({ status, distributorType } = {}) {
-  const conditions = [];
+  const conditions = ["u.deleted_at IS NULL"];
   const params = [];
   if (status) {
     params.push(status);
@@ -13,10 +13,11 @@ async function listDistributors({ status, distributorType } = {}) {
     params.push(distributorType);
     conditions.push(`d.distributor_type = $${params.length}`);
   }
-  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const where = `WHERE ${conditions.join(" AND ")}`;
 
   const result = await db.query(
-    `SELECT d.*, u.full_name, u.email, u.phone, u.state, u.status AS user_status, t.name AS territory_name
+    `SELECT d.*, u.full_name, u.email, u.phone, u.state, u.status AS user_status, t.name AS territory_name,
+            (SELECT COUNT(*) FROM users u2 WHERE u2.email = u.email AND u2.deleted_at IS NOT NULL) AS prior_accounts_count
      FROM distributors d
      JOIN users u ON u.id = d.user_id
      LEFT JOIN territories t ON t.id = d.territory_id
@@ -25,6 +26,22 @@ async function listDistributors({ status, distributorType } = {}) {
     params
   );
   return result.rows;
+}
+
+// Soft-delete — see removeCustomer in customer.service.js for the full
+// rationale. Works for both a sales rep and a true distributor; the row
+// stays in `distributors` untouched, only the linked `users` row is marked
+// deleted, which is what every list/lookup filters on.
+async function removeDistributor(distributorId) {
+  const dist = await db.query("SELECT user_id FROM distributors WHERE id = $1", [distributorId]);
+  if (dist.rows.length === 0) throw new ApiError(404, "Distributor not found");
+
+  const result = await db.query(
+    `UPDATE users SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+    [dist.rows[0].user_id]
+  );
+  if (result.rows.length === 0) throw new ApiError(400, "Already removed");
+  return result.rows[0];
 }
 
 // Approving a distributor also flips their user account from 'pending' to
@@ -150,9 +167,12 @@ async function getDistributorHistory(distributorId) {
 
   const ordersResult = await db.query(
     `SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
-            p.status AS payment_status, p.paid_at, p.paystack_ref, p.amount AS payment_amount,
             del.gps_status AS delivery_status,
             cu.full_name AS customer_full_name, cp.business_name AS customer_business_name,
+            COALESCE(
+              (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
+              0
+            ) AS paid_amount,
             COALESCE(
               (SELECT json_agg(json_build_object(
                  'productName', pr.name, 'quantity', oi.quantity,
@@ -163,7 +183,6 @@ async function getDistributorHistory(distributorId) {
               '[]'
             ) AS items
      FROM orders o
-     LEFT JOIN payments p ON p.order_id = o.id
      LEFT JOIN deliveries del ON del.order_id = o.id
      LEFT JOIN users cu ON cu.id = o.customer_id
      LEFT JOIN customer_profiles cp ON cp.user_id = o.customer_id
@@ -172,13 +191,14 @@ async function getDistributorHistory(distributorId) {
     [distributorId]
   );
 
-  const orders = ordersResult.rows;
+  const orders = ordersResult.rows.map((o) => ({
+    ...o,
+    payment_percent: Number(o.total_amount) > 0 ? (Number(o.paid_amount) / Number(o.total_amount)) * 100 : 0,
+  }));
   const totalOrders = orders.length;
-  const totalRevenue = orders
-    .filter((o) => o.payment_status === "successful")
-    .reduce((sum, o) => sum + Number(o.payment_amount || 0), 0);
-  const pendingPayments = orders.filter((o) => !o.payment_status || o.payment_status === "initiated").length;
-  const failedPayments = orders.filter((o) => o.payment_status === "failed").length;
+  const totalRevenue = orders.reduce((sum, o) => sum + Number(o.paid_amount || 0), 0);
+  const pendingPayments = orders.filter((o) => o.payment_percent < 100).length;
+  const failedPayments = 0;
 
   return {
     profile: profileResult.rows[0],
@@ -212,6 +232,23 @@ async function listMyCustomers(userId) {
   return result.rows;
 }
 
+// Everything currently in the trash — customers, sales reps, and
+// distributors together, admin-only. Nothing here is destroyed; this is
+// purely a visibility view.
+async function listTrash() {
+  const result = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.deleted_at,
+            d.business_name AS distributor_business_name, d.distributor_type,
+            cp.business_name AS customer_business_name
+     FROM users u
+     LEFT JOIN distributors d ON d.user_id = u.id
+     LEFT JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.deleted_at IS NOT NULL
+     ORDER BY u.deleted_at DESC`
+  );
+  return result.rows;
+}
+
 module.exports = {
   listDistributors,
   approveDistributor,
@@ -222,4 +259,6 @@ module.exports = {
   getReferralInfo,
   getDistributorHistory,
   listMyCustomers,
+  removeDistributor,
+  listTrash,
 };

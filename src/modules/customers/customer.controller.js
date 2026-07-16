@@ -18,4 +18,9 @@ const historyHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: history });
 });
 
-module.exports = { listHandler, reassignDistributorHandler, historyHandler };
+const removeHandler = asyncHandler(async (req, res) => {
+  await customerService.removeCustomer(req.params.id);
+  res.json({ success: true, message: "Removed" });
+});
+
+module.exports = { listHandler, reassignDistributorHandler, historyHandler, removeHandler };

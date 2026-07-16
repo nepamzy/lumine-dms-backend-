@@ -130,7 +130,7 @@ for (const item of items) {
       }
 
       const variantResult = await client.query(
-        `SELECT v.id AS variant_id, v.product_id, v.size, p.is_active
+        `SELECT v.id AS variant_id, v.product_id, v.size, v.pack_price, p.is_active
          FROM product_variants v
          JOIN products p ON p.id = v.product_id
          WHERE v.id = $1`,
@@ -142,6 +142,9 @@ for (const item of items) {
       const variant = variantResult.rows[0];
       if (!variant.is_active) {
         throw new ApiError(400, `This product is no longer available`);
+      }
+      if (variant.pack_price == null) {
+        throw new ApiError(400, `No price configured for this product yet`);
       }
 
       // Orders are placed in half-pack increments only — never single
@@ -155,27 +158,27 @@ for (const item of items) {
         );
       }
 
-      // Resolve the correct tiered price for the requested quantity
-      // Sales reps place orders on a customer's behalf but never handle
-      // payment or pricing incentives themselves — when placedByUserId is
-      // set (a sales rep placed this), always use the base/first-tier
-      // price, matching exactly what they saw while building the order.
-      // Otherwise resolve the normal quantity-based discount tier.
-      const tierResult = placedByUserId
-        ? await client.query(
-            `SELECT price FROM price_tiers WHERE variant_id = $1 ORDER BY min_qty ASC LIMIT 1`,
-            [item.variantId]
-          )
-        : await client.query(
-            `SELECT price FROM price_tiers
-             WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
-             ORDER BY min_qty DESC LIMIT 1`,
-            [item.variantId, item.quantity]
-          );
-      if (tierResult.rows.length === 0) {
-        throw new ApiError(400, `No price tier found for this quantity`);
+      // Pricing is per PACK. Customers and sales reps (placedByUserId set,
+      // or a customer buying for themselves) always pay the flat pack
+      // price — no discount, ever. Only a true distributor buying for
+      // themselves gets the bulk pack-count discount tiers.
+      const packSize = halfPackUnit * 2;
+      const packs = item.quantity / packSize;
+      let pricePerPack = Number(variant.pack_price);
+
+      if (buyer.kind === "distributor") {
+        const tierResult = await client.query(
+          `SELECT price FROM price_tiers
+           WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
+           ORDER BY min_qty DESC LIMIT 1`,
+          [item.variantId, packs]
+        );
+        if (tierResult.rows.length > 0) {
+          pricePerPack = Number(tierResult.rows[0].price);
+        }
       }
-      const unitPrice = Number(tierResult.rows[0].price);
+
+      const unitPrice = pricePerPack / packSize;
 
       // FEFO reservation ΓÇö may split across multiple batches if needed
       const allocations = await reserveStockFEFO(client, variant.product_id, item.quantity);
@@ -193,8 +196,23 @@ for (const item of items) {
     }
 
     // A distributor's own order isn't delivered by a sales rep — only
-    // customer orders get a sales rep assigned as the deliverer.
-    const distributorId = customer.kind === "customer" ? await findDistributorForState(client, customer.state) : null;
+    // customer orders get a sales rep assigned as the deliverer. Use the
+    // customer's ACTUAL assigned sales rep (set at registration/referral
+    // time) so every order they place — whether they click it themselves
+    // or their sales rep places it on their behalf — always routes to the
+    // same rep. Only fall back to a fresh state-based match if they
+    // somehow have no assignment yet.
+    let distributorId = null;
+    if (customer.kind === "customer") {
+      const assignedResult = await client.query(
+        `SELECT assigned_distributor_id FROM customer_profiles WHERE user_id = $1`,
+        [buyer.id]
+      );
+      distributorId = assignedResult.rows[0]?.assigned_distributor_id || null;
+      if (!distributorId) {
+        distributorId = await findDistributorForState(client, customer.state);
+      }
+    }
     const orderNumber = generateOrderNumber();
 
     const orderResult = await client.query(

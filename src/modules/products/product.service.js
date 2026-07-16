@@ -143,7 +143,10 @@ async function getVariantsWithTiers(productId) {
       `SELECT min_qty, max_qty, price FROM price_tiers WHERE variant_id = $1 ORDER BY min_qty ASC`,
       [variant.id]
     );
+    // priceTiers = distributor-only bulk discount tiers (by pack count).
+    // packPrice = the flat "Normal Price" everyone else always pays.
     variant.priceTiers = tiers.rows;
+    variant.packPrice = variant.pack_price;
   }
   return variants.rows;
 }
