@@ -182,6 +182,31 @@ async function getDistributorHistory(distributorId) {
   };
 }
 
+// A sales rep's own book of customers — used to pick who they're placing
+// an order on behalf of. Never exposed to a true distributor (they don't
+// manage customers at all).
+async function listMyCustomers(userId) {
+  const distResult = await db.query(
+    "SELECT id, distributor_type FROM distributors WHERE user_id = $1",
+    [userId]
+  );
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
+  const dist = distResult.rows[0];
+  if (dist.distributor_type !== "sales_rep") {
+    throw new ApiError(403, "Only sales reps have a customer book");
+  }
+
+  const result = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name
+     FROM customer_profiles cp
+     JOIN users u ON u.id = cp.user_id
+     WHERE cp.assigned_distributor_id = $1
+     ORDER BY u.full_name ASC`,
+    [dist.id]
+  );
+  return result.rows;
+}
+
 module.exports = {
   listDistributors,
   approveDistributor,
@@ -191,4 +216,5 @@ module.exports = {
   createTerritory,
   getReferralInfo,
   getDistributorHistory,
+  listMyCustomers,
 };

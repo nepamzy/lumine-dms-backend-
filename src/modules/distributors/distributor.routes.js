@@ -16,6 +16,16 @@ router.get(
   })
 );
 
+router.get(
+  "/me/customers",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const customers = await service.listMyCustomers(req.user.id);
+    res.json({ success: true, data: customers });
+  })
+);
+
 router.use(authenticate, authorize("admin"));
 
 router.get(

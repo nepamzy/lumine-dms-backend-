@@ -20,7 +20,7 @@ async function findClosestDistributor(client, { state, localGovernment }) {
        FROM distributors d
        JOIN users u ON u.id = d.user_id
        LEFT JOIN customer_profiles cp ON cp.assigned_distributor_id = d.id
-       WHERE d.approval_status = 'approved' AND u.status = 'active'
+       WHERE d.approval_status = 'approved' AND u.status = 'active' AND d.distributor_type = 'sales_rep'
          AND u.state = $1 AND u.local_government = $2
        GROUP BY d.id
        ORDER BY COUNT(cp.id) ASC
@@ -35,7 +35,7 @@ async function findClosestDistributor(client, { state, localGovernment }) {
      FROM distributors d
      JOIN users u ON u.id = d.user_id
      LEFT JOIN customer_profiles cp ON cp.assigned_distributor_id = d.id
-     WHERE d.approval_status = 'approved' AND u.status = 'active'
+     WHERE d.approval_status = 'approved' AND u.status = 'active' AND d.distributor_type = 'sales_rep'
        AND u.state = $1
      GROUP BY d.id
      ORDER BY COUNT(cp.id) ASC
@@ -106,7 +106,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
           `SELECT d.id
            FROM distributors d
            JOIN users u ON u.id = d.user_id
-           WHERE d.referral_code = $1 AND d.approval_status = 'approved' AND u.status = 'active'`,
+           WHERE d.referral_code = $1 AND d.approval_status = 'approved' AND u.status = 'active' AND d.distributor_type = 'sales_rep'`,
           [extra.referralCode]
         );
         if (referrer.rows.length > 0) {
@@ -212,6 +212,7 @@ async function getCurrentUser(userId) {
             d.distributor_type,
             d.approval_status,
             cp.business_name AS customer_business_name, cp.customer_type, cp.delivery_address,
+            cp.acknowledged_payment_notice,
             cp.assigned_distributor_id, cp.referred_by_distributor_id
      FROM users u
      LEFT JOIN distributors d ON d.user_id = u.id
@@ -293,4 +294,13 @@ async function changePassword(userId, currentPassword, newPassword) {
   const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
   await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [newHash, userId]);
 }
-module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword };
+async function acknowledgePaymentNotice(userId) {
+  const result = await db.query(
+    `UPDATE customer_profiles SET acknowledged_payment_notice = true WHERE user_id = $1 RETURNING *`,
+    [userId]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "Customer profile not found");
+  return result.rows[0];
+}
+
+module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice };

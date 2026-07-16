@@ -90,6 +90,11 @@ const changePasswordHandler = asyncHandler(async (req, res) => {
   await authService.changePassword(req.user.id, currentPassword, newPassword);
   res.json({ success: true, message: "Password changed successfully" });
 });
+const acknowledgePaymentNoticeHandler = asyncHandler(async (req, res) => {
+  await authService.acknowledgePaymentNotice(req.user.id);
+  res.json({ success: true, message: "Acknowledged" });
+});
+
 module.exports = {
   registerHandler,
   loginHandler,
@@ -98,4 +103,5 @@ module.exports = {
   meHandler,
   updateProfileHandler,
   changePasswordHandler,
+  acknowledgePaymentNoticeHandler,
 };

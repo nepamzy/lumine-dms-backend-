@@ -3,8 +3,13 @@ const ApiError = require("../../utils/ApiError");
 const orderService = require("./order.service");
 
 const createHandler = asyncHandler(async (req, res) => {
-  const { items } = req.body;
-  const order = await orderService.createOrder(req.user.id, items);
+  const { items, customerId } = req.body;
+  // Sales reps place orders on behalf of a customer (customerId in body);
+  // everyone else (a customer buying for themselves, or a true distributor
+  // buying for themselves) just buys as req.user.
+  const buyerId = req.user.role === "distributor" && customerId ? customerId : req.user.id;
+  const placedByUserId = buyerId !== req.user.id ? req.user.id : undefined;
+  const order = await orderService.createOrder(buyerId, items, { placedByUserId });
   res.status(201).json({ success: true, data: order });
 });
 
@@ -42,6 +47,28 @@ const assignDistributorHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
+const logPaymentHandler = asyncHandler(async (req, res) => {
+  const { amount, note } = req.body;
+  if (!amount) throw new ApiError(400, "amount is required");
+  const order = await orderService.logPayment(req.params.id, Number(amount), req.user, note);
+  res.json({ success: true, data: order });
+});
+
+const confirmTransportHandler = asyncHandler(async (req, res) => {
+  const order = await orderService.confirmTransport(req.params.id, req.user);
+  res.json({ success: true, data: order });
+});
+
+const confirmReceivedHandler = asyncHandler(async (req, res) => {
+  const order = await orderService.confirmReceived(req.params.id, req.user, { as: req.body.as });
+  res.json({ success: true, data: order });
+});
+
+const listExpiringHandler = asyncHandler(async (req, res) => {
+  const orders = await orderService.listExpiringOrders(req.user);
+  res.json({ success: true, data: orders });
+});
+
 module.exports = {
   createHandler,
   listHandler,
@@ -49,4 +76,8 @@ module.exports = {
   cancelHandler,
   updateStatusHandler,
   assignDistributorHandler,
+  logPaymentHandler,
+  confirmTransportHandler,
+  confirmReceivedHandler,
+  listExpiringHandler,
 };
