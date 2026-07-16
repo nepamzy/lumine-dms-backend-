@@ -28,4 +28,21 @@ function authorize(...allowedRoles) {
   };
 }
 
-module.exports = { authenticate, authorize };
+// Like authenticate, but doesn't fail when there's no token — used on
+// public routes that behave slightly differently for a logged-in admin
+// (e.g. product listing showing inactive items too).
+function optionalAuthenticate(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith("Bearer ")) return next();
+
+  const token = header.split(" ")[1];
+  try {
+    req.user = verifyAccessToken(token);
+  } catch {
+    // Invalid/expired token on a public route — just proceed as anonymous
+    // rather than blocking the request.
+  }
+  next();
+}
+
+module.exports = { authenticate, authorize, optionalAuthenticate };

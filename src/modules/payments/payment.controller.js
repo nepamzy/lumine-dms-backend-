@@ -4,20 +4,14 @@ const db = require("../../config/db");
 const paymentService = require("./payment.service");
 
 const initializeHandler = asyncHandler(async (req, res) => {
-  const { orderId } = req.body;
-  if (!orderId) throw new ApiError(400, "orderId is required");
-
-  // confirm the order belongs to the requesting customer
-  const orderResult = await db.query("SELECT customer_id FROM orders WHERE id = $1", [orderId]);
-  if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
-  if (orderResult.rows[0].customer_id !== req.user.id) {
-    throw new ApiError(403, "This isn't your order");
-  }
+  const { orderId, amount } = req.body;
+  if (!orderId || !amount) throw new ApiError(400, "orderId and amount are required");
 
   const userResult = await db.query("SELECT email FROM users WHERE id = $1", [req.user.id]);
-  const { authorizationUrl, reference } = await paymentService.initializePayment(
+  const { authorizationUrl, reference } = await paymentService.initializePaystackPayment(
     orderId,
-    userResult.rows[0].email
+    Number(amount),
+    { id: req.user.id, email: userResult.rows[0].email }
   );
 
   res.json({ success: true, data: { authorizationUrl, reference } });
@@ -36,17 +30,19 @@ const webhookHandler = asyncHandler(async (req, res) => {
   const event = JSON.parse(req.body.toString("utf8"));
 
   if (event.event === "charge.success") {
-    await paymentService.confirmAndApplyPayment(event.data.reference);
+    await paymentService.confirmPaystackPayment(event.data.reference);
   }
 
   // Always 200 quickly so Paystack doesn't retry unnecessarily
   res.sendStatus(200);
 });
 
-// Lets the frontend poll/confirm status after redirect back from Paystack
+// Lets the frontend confirm status after redirect back from Paystack —
+// belt-and-suspenders alongside the webhook, since a user's browser
+// redirect can arrive before or after the webhook does.
 const verifyHandler = asyncHandler(async (req, res) => {
-  const payment = await paymentService.confirmAndApplyPayment(req.params.reference);
-  res.json({ success: true, data: payment });
+  const order = await paymentService.confirmPaystackPayment(req.params.reference);
+  res.json({ success: true, data: order });
 });
 
 module.exports = { initializeHandler, webhookHandler, verifyHandler };

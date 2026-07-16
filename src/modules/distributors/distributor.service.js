@@ -2,13 +2,18 @@ const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { notifyDistributorApproved } = require("../notifications/notification.service");
 
-async function listDistributors({ status } = {}) {
+async function listDistributors({ status, distributorType } = {}) {
+  const conditions = [];
   const params = [];
-  let where = "";
   if (status) {
     params.push(status);
-    where = "WHERE d.approval_status = $1";
+    conditions.push(`d.approval_status = $${params.length}`);
   }
+  if (distributorType) {
+    params.push(distributorType);
+    conditions.push(`d.distributor_type = $${params.length}`);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
   const result = await db.query(
     `SELECT d.*, u.full_name, u.email, u.phone, u.state, u.status AS user_status, t.name AS territory_name

@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { authenticate, authorize } = require("../../middleware/auth.middleware");
+const { authenticate, authorize, optionalAuthenticate } = require("../../middleware/auth.middleware");
 const {
   listHandler,
   getOneHandler,
@@ -13,7 +13,7 @@ const {
 } = require("./product.controller");
 
 // Public catalog browsing (customers don't need to be logged in to view)
-router.get("/", listHandler);
+router.get("/", optionalAuthenticate, listHandler);
 router.get("/expiring", authenticate, authorize("admin"), expiringHandler);
 router.get("/:id", getOneHandler);
 router.get("/:id/variants", getVariantsHandler);

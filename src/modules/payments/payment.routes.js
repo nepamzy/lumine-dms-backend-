@@ -3,7 +3,7 @@ const router = express.Router();
 const { authenticate, authorize } = require("../../middleware/auth.middleware");
 const { initializeHandler, verifyHandler } = require("./payment.controller");
 
-router.post("/initialize", authenticate, authorize("customer"), initializeHandler);
+router.post("/initialize", authenticate, authorize("customer", "distributor"), initializeHandler);
 router.get("/verify/:reference", authenticate, verifyHandler);
 
 // Note: POST /webhook is intentionally NOT here — it's mounted directly in

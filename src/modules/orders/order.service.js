@@ -156,12 +156,22 @@ for (const item of items) {
       }
 
       // Resolve the correct tiered price for the requested quantity
-      const tierResult = await client.query(
-        `SELECT price FROM price_tiers
-         WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
-         ORDER BY min_qty DESC LIMIT 1`,
-        [item.variantId, item.quantity]
-      );
+      // Sales reps place orders on a customer's behalf but never handle
+      // payment or pricing incentives themselves — when placedByUserId is
+      // set (a sales rep placed this), always use the base/first-tier
+      // price, matching exactly what they saw while building the order.
+      // Otherwise resolve the normal quantity-based discount tier.
+      const tierResult = placedByUserId
+        ? await client.query(
+            `SELECT price FROM price_tiers WHERE variant_id = $1 ORDER BY min_qty ASC LIMIT 1`,
+            [item.variantId]
+          )
+        : await client.query(
+            `SELECT price FROM price_tiers
+             WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
+             ORDER BY min_qty DESC LIMIT 1`,
+            [item.variantId, item.quantity]
+          );
       if (tierResult.rows.length === 0) {
         throw new ApiError(400, `No price tier found for this quantity`);
       }
@@ -226,14 +236,40 @@ for (const item of items) {
 
 async function getPaymentSummary(orderId, totalAmount) {
   const result = await db.query(
-    `SELECT id, amount, recorded_by, note, recorded_at,
+    `SELECT id, amount, status, recorded_by, note, recorded_at, paystack_reference,
             (SELECT full_name FROM users WHERE id = order_payments.recorded_by) AS recorded_by_name
      FROM order_payments WHERE order_id = $1 ORDER BY recorded_at ASC`,
     [orderId]
   );
-  const totalPaid = result.rows.reduce((sum, p) => sum + Number(p.amount), 0);
+  // Only Paystack-confirmed payments count toward the total — a 'pending'
+  // row (checkout started but not yet confirmed) or 'failed' one never
+  // counts, no matter what amount was entered.
+  const totalPaid = result.rows
+    .filter((p) => p.status === "successful")
+    .reduce((sum, p) => sum + Number(p.amount), 0);
   const percent = Number(totalAmount) > 0 ? (totalPaid / Number(totalAmount)) * 100 : 0;
   return { totalPaid, percent, payments: result.rows };
+}
+
+// Shared validation for any payment attempt — used both by the (legacy)
+// manual logPayment and the real Paystack initialize flow. Throws if the
+// amount isn't allowed; returns nothing if it's fine.
+function validatePaymentAmount(order, amount) {
+  if (!(amount > 0)) throw new ApiError(400, "Payment amount must be greater than zero");
+  if (order.payment.totalPaid >= Number(order.total_amount)) {
+    throw new ApiError(400, "This order is already fully paid");
+  }
+  if (order.buyerKind === "distributor") {
+    const wouldBeTotal = order.payment.totalPaid + Number(amount);
+    const wouldCompleteOrder = wouldBeTotal >= Number(order.total_amount);
+    const minPayment = (DISTRIBUTOR_MIN_PAYMENT_PERCENT / 100) * Number(order.total_amount);
+    if (Number(amount) < minPayment && !wouldCompleteOrder) {
+      throw new ApiError(
+        400,
+        `Distributor payments must be at least ${DISTRIBUTOR_MIN_PAYMENT_PERCENT}% of the order total (₦${minPayment.toLocaleString()}) unless it completes the order.`
+      );
+    }
+  }
 }
 
 // Placed and in-production are derived, never stored: placed = the order
@@ -432,35 +468,21 @@ async function assignDistributor(orderId, distributorId) {
 // a per-payment floor of 70% of the total — unless this payment is the one
 // that completes the order (brings it to 100%), so a small final top-up
 // isn't wrongly blocked. Customers can pay any amount, any number of times.
+// Manual payment logging — kept as an admin-only escape hatch (e.g.
+// reconciling a payment confirmed by other means), NOT exposed to buyers.
+// Real buyer-facing payments always go through Paystack via
+// initializePaystackPayment / confirmPaystackPayment below, so they only
+// ever count once the money is actually confirmed received.
 async function logPayment(orderId, amount, actingUser, note) {
-  if (!(amount > 0)) throw new ApiError(400, "Payment amount must be greater than zero");
+  if (actingUser.role !== "admin") {
+    throw new ApiError(403, "Payments must go through Paystack — only admin can log a manual entry");
+  }
 
   const order = await getOrderById(orderId);
-
-  const isBuyer = order.customer_id === actingUser.id;
-  const isAdmin = actingUser.role === "admin";
-  if (!isBuyer && !isAdmin) {
-    throw new ApiError(403, "Only the buyer or an admin can log a payment on this order");
-  }
-
-  if (order.buyerKind === "distributor") {
-    const wouldBeTotal = order.payment.totalPaid + Number(amount);
-    const wouldCompleteOrder = wouldBeTotal >= Number(order.total_amount);
-    const minPayment = (DISTRIBUTOR_MIN_PAYMENT_PERCENT / 100) * Number(order.total_amount);
-    if (Number(amount) < minPayment && !wouldCompleteOrder) {
-      throw new ApiError(
-        400,
-        `Distributor payments must be at least ${DISTRIBUTOR_MIN_PAYMENT_PERCENT}% of the order total (₦${minPayment.toLocaleString()}) unless it completes the order.`
-      );
-    }
-  }
-
-  if (order.payment.totalPaid >= Number(order.total_amount)) {
-    throw new ApiError(400, "This order is already fully paid");
-  }
+  validatePaymentAmount(order, amount);
 
   await db.query(
-    `INSERT INTO order_payments (order_id, amount, recorded_by, note) VALUES ($1, $2, $3, $4)`,
+    `INSERT INTO order_payments (order_id, amount, recorded_by, note, status) VALUES ($1, $2, $3, $4, 'successful')`,
     [orderId, amount, actingUser.id, note || null]
   );
 
@@ -605,4 +627,5 @@ module.exports = {
   confirmTransport,
   confirmReceived,
   listExpiringOrders,
+  validatePaymentAmount,
 };

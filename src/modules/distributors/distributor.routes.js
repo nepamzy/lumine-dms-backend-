@@ -31,7 +31,10 @@ router.use(authenticate, authorize("admin"));
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const distributors = await service.listDistributors({ status: req.query.status });
+    const distributors = await service.listDistributors({
+      status: req.query.status,
+      distributorType: req.query.distributorType,
+    });
     res.json({ success: true, data: distributors });
   })
 );
