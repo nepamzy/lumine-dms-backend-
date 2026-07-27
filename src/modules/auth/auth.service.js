@@ -53,6 +53,15 @@ async function register({ fullName, email, phone, password, role, state, latitud
     throw new ApiError(400, "Invalid role for self-registration");
   }
 
+  // Location is mandatory for Customers and Sales Reps — they can't sign
+  // up without granting it. A true Distributor is exempt (map shows them
+  // if/when a location happens to be on file, but it's never required).
+  const distributorTypeForCheck = role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : null;
+  const locationRequired = role === "customer" || distributorTypeForCheck === "sales_rep";
+  if (locationRequired && (latitude == null || longitude == null)) {
+    throw new ApiError(400, "Location access is required to sign up as a customer or sales rep. Please allow location access and try again.");
+  }
+
   const existing = await db.query(
     "SELECT id FROM users WHERE (email = $1 OR phone = $2) AND deleted_at IS NULL",
     [email, phone]
@@ -208,6 +217,7 @@ async function logout(refreshToken) {
 async function getCurrentUser(userId) {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.state, u.local_government, u.status, u.created_at,
+            u.location_captured_at,
             d.id AS distributor_id, d.referral_code, d.business_name AS distributor_business_name,
             d.distributor_type,
             d.approval_status,
@@ -221,7 +231,29 @@ async function getCurrentUser(userId) {
     [userId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "User not found");
-  return result.rows[0];
+  const user = result.rows[0];
+
+  // Customers and Sales Reps must have granted location — true Distributors
+  // are exempt. Existing accounts created before this requirement (or that
+  // slipped through without it) get re-prompted until they grant it.
+  user.needsLocationConsent =
+    !user.location_captured_at && (user.role === "customer" || user.distributor_type === "sales_rep");
+
+  return user;
+}
+
+// Lets an authenticated user submit their current GPS position — used both
+// by the mandatory re-prompt for pre-existing accounts, and available for
+// anyone to refresh their location later.
+async function updateLocation(userId, { latitude, longitude }) {
+  if (latitude == null || longitude == null) {
+    throw new ApiError(400, "latitude and longitude are required");
+  }
+  await db.query(
+    `UPDATE users SET latitude = $1, longitude = $2, location_captured_at = now() WHERE id = $3`,
+    [latitude, longitude, userId]
+  );
+  return getCurrentUser(userId);
 }
 async function updateProfile(userId, updates) {
   const allowedUserFields = ["full_name", "phone", "state", "local_government"];
@@ -303,4 +335,4 @@ async function acknowledgePaymentNotice(userId) {
   return result.rows[0];
 }
 
-module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice };
+module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation };

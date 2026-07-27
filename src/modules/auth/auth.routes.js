@@ -10,6 +10,7 @@ const {
   updateProfileHandler,
   changePasswordHandler,
   acknowledgePaymentNoticeHandler,
+  updateLocationHandler,
 } = require("./auth.controller");
 router.post("/register", registerHandler);
 router.post("/login", loginHandler);
@@ -17,6 +18,7 @@ router.post("/refresh", refreshHandler);
 router.post("/logout", logoutHandler);
 router.get("/me", authenticate, meHandler);
 router.patch("/me", authenticate, updateProfileHandler);
+router.patch("/me/location", authenticate, updateLocationHandler);
 router.post("/change-password", authenticate, changePasswordHandler);
 router.post("/acknowledge-payment-notice", authenticate, authorize("customer"), acknowledgePaymentNoticeHandler);
 

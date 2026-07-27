@@ -95,6 +95,12 @@ const acknowledgePaymentNoticeHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Acknowledged" });
 });
 
+const updateLocationHandler = asyncHandler(async (req, res) => {
+  const { latitude, longitude } = req.body;
+  const user = await authService.updateLocation(req.user.id, { latitude, longitude });
+  res.json({ success: true, data: user });
+});
+
 module.exports = {
   registerHandler,
   loginHandler,
@@ -104,4 +110,5 @@ module.exports = {
   updateProfileHandler,
   changePasswordHandler,
   acknowledgePaymentNoticeHandler,
+  updateLocationHandler,
 };
