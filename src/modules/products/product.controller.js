@@ -24,6 +24,11 @@ const updateHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: product });
 });
 
+const deleteHandler = asyncHandler(async (req, res) => {
+  const result = await productService.deleteProduct(req.params.id);
+  res.json({ success: true, data: result });
+});
+
 const addBatchHandler = asyncHandler(async (req, res) => {
   const { batchNumber, quantity, expiryDate } = req.body;
   const batch = await productService.addBatch(req.params.id, {
@@ -32,6 +37,17 @@ const addBatchHandler = asyncHandler(async (req, res) => {
     expiryDate,
   });
   res.status(201).json({ success: true, data: batch });
+});
+
+const updateBatchHandler = asyncHandler(async (req, res) => {
+  const { quantity } = req.body;
+  const batch = await productService.updateBatchQuantity(req.params.id, req.params.batchId, Number(quantity));
+  res.json({ success: true, data: batch });
+});
+
+const deleteBatchHandler = asyncHandler(async (req, res) => {
+  const result = await productService.deleteBatch(req.params.id, req.params.batchId);
+  res.json({ success: true, data: result });
 });
 
 const expiringHandler = asyncHandler(async (req, res) => {
@@ -55,7 +71,10 @@ module.exports = {
   getOneHandler,
   createHandler,
   updateHandler,
+  deleteHandler,
   addBatchHandler,
+  updateBatchHandler,
+  deleteBatchHandler,
   expiringHandler,
   getVariantsHandler,
   createVariantHandler,

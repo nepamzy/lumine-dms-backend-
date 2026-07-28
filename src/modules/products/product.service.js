@@ -2,13 +2,19 @@ const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 
 async function listProducts({ activeOnly = true } = {}) {
+  // Soft-deleted products never come back here, regardless of activeOnly —
+  // that flag only toggles whether "marked out of stock" (is_active=false)
+  // products are included, not deleted ones.
+  const conditions = ["p.deleted_at IS NULL"];
+  if (activeOnly) conditions.push("p.is_active = true");
+
   const result = await db.query(
     `SELECT p.*,
             COALESCE(SUM(b.quantity_on_hand), 0) AS total_stock,
             MIN(b.expiry_date) FILTER (WHERE b.quantity_on_hand > 0) AS nearest_expiry
      FROM products p
      LEFT JOIN product_batches b ON b.product_id = p.id
-     ${activeOnly ? "WHERE p.is_active = true" : ""}
+     WHERE ${conditions.join(" AND ")}
      GROUP BY p.id
      ORDER BY p.name ASC`
   );
@@ -16,6 +22,9 @@ async function listProducts({ activeOnly = true } = {}) {
 }
 
 async function getProductById(id) {
+  // Not filtered by deleted_at on purpose — past orders/receipts still
+  // need to resolve a product's name/sku even after it's been removed
+  // from the live catalog.
   const result = await db.query("SELECT * FROM products WHERE id = $1", [id]);
   if (result.rows.length === 0) throw new ApiError(404, "Product not found");
 
@@ -24,6 +33,52 @@ async function getProductById(id) {
     [id]
   );
   return { ...result.rows[0], batches: batches.rows };
+}
+
+// Soft-deletes an entire product line ("remove a whole tab of product").
+// Variants/batches stay in the DB (so historical orders keep resolving
+// correctly) but the product itself disappears from every product list.
+async function deleteProduct(id) {
+  const result = await db.query(
+    `UPDATE products SET deleted_at = now(), is_active = false
+     WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+    [id]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "Product not found or already removed");
+  return result.rows[0];
+}
+
+// Edits the quantity_on_hand of a batch that was already entered — for
+// correcting a mistyped figure, not for adding new stock (use addBatch
+// for that, since new stock should always be its own traceable batch).
+async function updateBatchQuantity(productId, batchId, quantity) {
+  if (quantity === undefined || quantity === null || quantity < 0) {
+    throw new ApiError(400, "quantity must be a number >= 0");
+  }
+  const result = await db.query(
+    `UPDATE product_batches SET quantity_on_hand = $1
+     WHERE id = $2 AND product_id = $3 RETURNING *`,
+    [quantity, batchId, productId]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "Batch not found for this product");
+  return result.rows[0];
+}
+
+// Removes a single out-of-stock batch entirely. Only allowed when its
+// quantity is already 0 — batches still holding stock should be corrected
+// via updateBatchQuantity instead, so nothing with live stock disappears
+// silently.
+async function deleteBatch(productId, batchId) {
+  const batch = await db.query(
+    `SELECT quantity_on_hand FROM product_batches WHERE id = $1 AND product_id = $2`,
+    [batchId, productId]
+  );
+  if (batch.rows.length === 0) throw new ApiError(404, "Batch not found for this product");
+  if (Number(batch.rows[0].quantity_on_hand) > 0) {
+    throw new ApiError(400, "Only out-of-stock batches (0 quantity) can be deleted");
+  }
+  await db.query(`DELETE FROM product_batches WHERE id = $1`, [batchId]);
+  return { id: batchId };
 }
 
 async function createProduct({ name, sku, category, unitPrice, imageUrl }) {
@@ -202,7 +257,10 @@ module.exports = {
   getProductById,
   createProduct,
   updateProduct,
+  deleteProduct,
   addBatch,
+  updateBatchQuantity,
+  deleteBatch,
   getExpiringBatches,
   reserveStockFEFO,
   getVariantsWithTiers,

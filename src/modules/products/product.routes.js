@@ -6,7 +6,10 @@ const {
   getOneHandler,
   createHandler,
   updateHandler,
+  deleteHandler,
   addBatchHandler,
+  updateBatchHandler,
+  deleteBatchHandler,
   expiringHandler,
   getVariantsHandler,
   createVariantHandler,
@@ -22,6 +25,9 @@ router.post("/:id/variants", authenticate, authorize("admin"), createVariantHand
 // Admin-only catalog management
 router.post("/", authenticate, authorize("admin"), createHandler);
 router.patch("/:id", authenticate, authorize("admin"), updateHandler);
+router.delete("/:id", authenticate, authorize("admin"), deleteHandler);
 router.post("/:id/batches", authenticate, authorize("admin"), addBatchHandler);
+router.patch("/:id/batches/:batchId", authenticate, authorize("admin"), updateBatchHandler);
+router.delete("/:id/batches/:batchId", authenticate, authorize("admin"), deleteBatchHandler);
 
 module.exports = router;

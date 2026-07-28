@@ -33,6 +33,17 @@ const cancelHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Order cancelled", data: order });
 });
 
+const editItemsHandler = asyncHandler(async (req, res) => {
+  const { items } = req.body;
+  const order = await orderService.editOrderItems(req.params.id, items, req.user);
+  res.json({ success: true, data: order });
+});
+
+const deleteHandler = asyncHandler(async (req, res) => {
+  const result = await orderService.deleteOrder(req.params.id, req.user);
+  res.json({ success: true, message: "Order removed", data: result });
+});
+
 const updateStatusHandler = asyncHandler(async (req, res) => {
   const { status } = req.body;
   if (!status) throw new ApiError(400, "status is required");
@@ -74,6 +85,8 @@ module.exports = {
   listHandler,
   getOneHandler,
   cancelHandler,
+  editItemsHandler,
+  deleteHandler,
   updateStatusHandler,
   assignDistributorHandler,
   logPaymentHandler,

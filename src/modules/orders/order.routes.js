@@ -6,6 +6,8 @@ const {
   listHandler,
   getOneHandler,
   cancelHandler,
+  editItemsHandler,
+  deleteHandler,
   updateStatusHandler,
   assignDistributorHandler,
   logPaymentHandler,
@@ -20,7 +22,9 @@ router.post("/", authorize("customer", "distributor"), createHandler);
 router.get("/", listHandler); // scoped by role inside the service
 router.get("/expiring", listExpiringHandler); // must come before /:id
 router.get("/:id", getOneHandler);
-router.post("/:id/cancel", authorize("customer", "admin"), cancelHandler);
+router.post("/:id/cancel", authorize("customer", "distributor", "admin"), cancelHandler);
+router.patch("/:id/items", authorize("customer", "distributor", "admin"), editItemsHandler);
+router.delete("/:id", authorize("admin"), deleteHandler);
 router.patch("/:id/status", authorize("admin", "distributor"), updateStatusHandler);
 router.patch("/:id/assign-distributor", authorize("admin"), assignDistributorHandler);
 router.post("/:id/payments", authorize("customer", "distributor", "admin"), logPaymentHandler);

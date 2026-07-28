@@ -89,6 +89,88 @@ async function assertCanPlaceOrder(client, buyerId, kind) {
   }
 }
 
+// Validates + prices a set of { variantId, quantity } items and reserves
+// FEFO stock for them. Shared by createOrder (new orders) and
+// editOrderItems (amending an existing pre-production order) so both
+// always price and reserve stock identically.
+async function buildOrderItemRows(client, buyer, items) {
+  let totalAmount = 0;
+  const orderItemRows = []; // { productId, variantId, batchId, quantity, unitPrice }
+
+  for (const item of items) {
+    if (!item.variantId || !item.quantity || item.quantity <= 0) {
+      throw new ApiError(400, "Each item needs a valid variantId and quantity > 0");
+    }
+
+    const variantResult = await client.query(
+      `SELECT v.id AS variant_id, v.product_id, v.size, v.pack_price, p.is_active
+       FROM product_variants v
+       JOIN products p ON p.id = v.product_id
+       WHERE v.id = $1`,
+      [item.variantId]
+    );
+    if (variantResult.rows.length === 0) {
+      throw new ApiError(404, `Variant ${item.variantId} not found`);
+    }
+    const variant = variantResult.rows[0];
+    if (!variant.is_active) {
+      throw new ApiError(400, `This product is no longer available`);
+    }
+    if (variant.pack_price == null) {
+      throw new ApiError(400, `No price configured for this product yet`);
+    }
+
+    // Orders are placed in half-pack increments only — never single
+    // bottles. 50cl/35cl come 24 to a pack (half = 12); 1L comes 12 to a
+    // pack (half = 6).
+    const halfPackUnit = HALF_PACK_UNITS[variant.size] || 1;
+    if (item.quantity % halfPackUnit !== 0) {
+      throw new ApiError(
+        400,
+        `${variant.size} must be ordered in half-pack increments of ${halfPackUnit} bottles`
+      );
+    }
+
+    // Pricing is per PACK. Customers and sales reps (placedByUserId set,
+    // or a customer buying for themselves) always pay the flat pack
+    // price — no discount, ever. Only a true distributor buying for
+    // themselves gets the bulk pack-count discount tiers.
+    const packSize = halfPackUnit * 2;
+    const packs = item.quantity / packSize;
+    let pricePerPack = Number(variant.pack_price);
+
+    if (buyer.kind === "distributor") {
+      const tierResult = await client.query(
+        `SELECT price FROM price_tiers
+         WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
+         ORDER BY min_qty DESC LIMIT 1`,
+        [item.variantId, packs]
+      );
+      if (tierResult.rows.length > 0) {
+        pricePerPack = Number(tierResult.rows[0].price);
+      }
+    }
+
+    const unitPrice = pricePerPack / packSize;
+
+    // FEFO reservation — may split across multiple batches if needed
+    const allocations = await reserveStockFEFO(client, variant.product_id, item.quantity);
+
+    for (const allocation of allocations) {
+      orderItemRows.push({
+        productId: variant.product_id,
+        variantId: item.variantId,
+        batchId: allocation.batchId,
+        quantity: allocation.quantity,
+        unitPrice,
+      });
+      totalAmount += allocation.quantity * unitPrice;
+    }
+  }
+
+  return { orderItemRows, totalAmount };
+}
+
 async function createOrder(buyerId, items, { placedByUserId } = {}) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new ApiError(400, "Order must contain at least one item");
@@ -121,79 +203,7 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
 
     const customer = buyer; // kept as `customer` below to minimize diff noise
 
-    let totalAmount = 0;
-    const orderItemRows = []; // { productId, batchId, quantity, unitPrice }
-
-for (const item of items) {
-      if (!item.variantId || !item.quantity || item.quantity <= 0) {
-        throw new ApiError(400, "Each item needs a valid variantId and quantity > 0");
-      }
-
-      const variantResult = await client.query(
-        `SELECT v.id AS variant_id, v.product_id, v.size, v.pack_price, p.is_active
-         FROM product_variants v
-         JOIN products p ON p.id = v.product_id
-         WHERE v.id = $1`,
-        [item.variantId]
-      );
-      if (variantResult.rows.length === 0) {
-        throw new ApiError(404, `Variant ${item.variantId} not found`);
-      }
-      const variant = variantResult.rows[0];
-      if (!variant.is_active) {
-        throw new ApiError(400, `This product is no longer available`);
-      }
-      if (variant.pack_price == null) {
-        throw new ApiError(400, `No price configured for this product yet`);
-      }
-
-      // Orders are placed in half-pack increments only — never single
-      // bottles. 50cl/35cl come 24 to a pack (half = 12); 1L comes 12 to a
-      // pack (half = 6).
-      const halfPackUnit = HALF_PACK_UNITS[variant.size] || 1;
-      if (item.quantity % halfPackUnit !== 0) {
-        throw new ApiError(
-          400,
-          `${variant.size} must be ordered in half-pack increments of ${halfPackUnit} bottles`
-        );
-      }
-
-      // Pricing is per PACK. Customers and sales reps (placedByUserId set,
-      // or a customer buying for themselves) always pay the flat pack
-      // price — no discount, ever. Only a true distributor buying for
-      // themselves gets the bulk pack-count discount tiers.
-      const packSize = halfPackUnit * 2;
-      const packs = item.quantity / packSize;
-      let pricePerPack = Number(variant.pack_price);
-
-      if (buyer.kind === "distributor") {
-        const tierResult = await client.query(
-          `SELECT price FROM price_tiers
-           WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
-           ORDER BY min_qty DESC LIMIT 1`,
-          [item.variantId, packs]
-        );
-        if (tierResult.rows.length > 0) {
-          pricePerPack = Number(tierResult.rows[0].price);
-        }
-      }
-
-      const unitPrice = pricePerPack / packSize;
-
-      // FEFO reservation ΓÇö may split across multiple batches if needed
-      const allocations = await reserveStockFEFO(client, variant.product_id, item.quantity);
-
-      for (const allocation of allocations) {
-        orderItemRows.push({
-          productId: variant.product_id,
-          variantId: item.variantId,
-          batchId: allocation.batchId,
-          quantity: allocation.quantity,
-          unitPrice,
-        });
-        totalAmount += allocation.quantity * unitPrice;
-      }
-    }
+    const { orderItemRows, totalAmount } = await buildOrderItemRows(client, buyer, items);
 
     // A distributor's own order isn't delivered by a sales rep — only
     // customer orders get a sales rep assigned as the deliverer. Use the
@@ -320,7 +330,8 @@ function computeStage(order, buyerKind) {
 
 async function getOrderById(id) {
   const orderResult = await db.query(
-    `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type
+    `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type,
+            u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone
      FROM orders o
      JOIN users u ON u.id = o.customer_id
      LEFT JOIN distributors d ON d.user_id = u.id
@@ -350,7 +361,7 @@ async function getOrderById(id) {
 
 // Customers see only their own orders; distributors see only assigned orders; admins see all
 async function listOrders(user, { status } = {}) {
-  const conditions = [];
+  const conditions = ["o.deleted_at IS NULL"];
   const values = [];
   let i = 1;
 
@@ -437,6 +448,9 @@ async function cancelOrder(orderId, actingUser) {
   if (!["pending", "paid"].includes(order.status)) {
     throw new ApiError(400, `Order in status "${order.status}" can no longer be cancelled`);
   }
+  if (order.stage.production) {
+    throw new ApiError(400, "This order has entered production and can no longer be cancelled");
+  }
 
   const client = await db.pool.connect();
   try {
@@ -453,6 +467,131 @@ async function cancelOrder(orderId, actingUser) {
       `UPDATE orders SET status = 'cancelled', updated_at = now() WHERE id = $1 RETURNING *`,
       [orderId]
     );
+
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Lets the buyer (or the sales rep who placed it on their behalf, or an
+// admin) change what's in an order — but only up until it enters
+// production (48hrs after creation), same cutoff as cancelOrder. Old
+// reserved stock is released and the new items are priced/reserved fresh,
+// using the exact same pricing logic as a brand-new order.
+async function editOrderItems(orderId, items, actingUser) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new ApiError(400, "Order must contain at least one item");
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const orderResult = await client.query(
+      `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type
+       FROM orders o
+       JOIN users u ON u.id = o.customer_id
+       LEFT JOIN distributors d ON d.user_id = u.id
+       WHERE o.id = $1
+       FOR UPDATE`,
+      [orderId]
+    );
+    if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
+    const order = orderResult.rows[0];
+
+    const isAdmin = actingUser.role === "admin";
+    const isBuyer = order.customer_id === actingUser.id;
+    const isPlacer = order.placed_by_user_id === actingUser.id;
+    if (!isAdmin && !isBuyer && !isPlacer) {
+      throw new ApiError(403, "You don't have access to this order");
+    }
+
+    if (!["pending", "paid"].includes(order.status)) {
+      throw new ApiError(400, `Order in status "${order.status}" can no longer be edited`);
+    }
+
+    const hoursSincePlaced = (Date.now() - new Date(order.created_at).getTime()) / (1000 * 60 * 60);
+    if (hoursSincePlaced >= PRODUCTION_DELAY_HOURS) {
+      throw new ApiError(400, "This order has entered production and can no longer be edited");
+    }
+
+    const buyerKind = order.buyer_role === "distributor" ? "distributor" : "customer";
+
+    // Release the old reservation before re-pricing/re-reserving the new items
+    const oldItems = await client.query(
+      `SELECT batch_id, quantity FROM order_items WHERE order_id = $1`,
+      [orderId]
+    );
+    for (const item of oldItems.rows) {
+      await client.query(
+        `UPDATE product_batches SET quantity_on_hand = quantity_on_hand + $1 WHERE id = $2`,
+        [item.quantity, item.batch_id]
+      );
+    }
+    await client.query(`DELETE FROM order_items WHERE order_id = $1`, [orderId]);
+
+    const { orderItemRows, totalAmount } = await buildOrderItemRows(
+      client,
+      { id: order.customer_id, kind: buyerKind },
+      items
+    );
+
+    for (const row of orderItemRows) {
+      await client.query(
+        `INSERT INTO order_items (order_id, product_id, variant_id, batch_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [orderId, row.productId, row.variantId, row.batchId, row.quantity, row.unitPrice]
+      );
+    }
+
+    await client.query(
+      `UPDATE orders SET total_amount = $1, updated_at = now() WHERE id = $2`,
+      [totalAmount, orderId]
+    );
+
+    await client.query("COMMIT");
+    return getOrderById(orderId);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Admin-only. Soft-deletes an order (never a hard DELETE — payments and
+// deliveries reference orders without cascade, so a real DELETE would
+// throw the moment either table has a row). If the order hadn't already
+// been delivered or cancelled, its reserved stock is released back first,
+// same as a cancellation, so inventory doesn't leak.
+async function deleteOrder(orderId, actingUser) {
+  if (actingUser.role !== "admin") throw new ApiError(403, "Only admin can delete an order");
+
+  const order = await getOrderById(orderId);
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    if (!["delivered", "cancelled"].includes(order.status)) {
+      for (const item of order.items) {
+        await client.query(
+          `UPDATE product_batches SET quantity_on_hand = quantity_on_hand + $1 WHERE id = $2`,
+          [item.quantity, item.batch_id]
+        );
+      }
+    }
+
+    const result = await client.query(
+      `UPDATE orders SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+      [orderId]
+    );
+    if (result.rows.length === 0) throw new ApiError(404, "Order not found or already removed");
 
     await client.query("COMMIT");
     return result.rows[0];
@@ -640,6 +779,8 @@ module.exports = {
   listOrders,
   updateStatus,
   cancelOrder,
+  editOrderItems,
+  deleteOrder,
   assignDistributor,
   logPayment,
   confirmTransport,
