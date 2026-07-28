@@ -62,6 +62,13 @@ async function register({ fullName, email, phone, password, role, state, latitud
     throw new ApiError(400, "Location access is required to sign up as a customer or sales rep. Please allow location access and try again.");
   }
 
+  // Business name is mandatory for Customers, but stays optional for
+  // Sales Reps (and true Distributors) — a sales rep may not run their
+  // own registered business, but every customer account represents one.
+  if (role === "customer" && !String(extra.businessName || "").trim()) {
+    throw new ApiError(400, "Business name is required to sign up as a customer");
+  }
+
   const existing = await db.query(
     "SELECT id FROM users WHERE (email = $1 OR phone = $2) AND deleted_at IS NULL",
     [email, phone]
