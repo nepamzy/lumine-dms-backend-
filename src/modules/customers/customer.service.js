@@ -1,12 +1,18 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 
-async function listCustomers() {
+async function listCustomers({ distributorId } = {}) {
+  const conditions = ["u.role = 'customer'", "u.deleted_at IS NULL"];
+  const values = [];
+  if (distributorId) {
+    conditions.push(`cp.assigned_distributor_id = $${values.length + 1}`);
+    values.push(distributorId);
+  }
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, u.state, u.local_government, u.status, u.created_at,
             u.latitude, u.longitude,
             cp.business_name, cp.customer_type, cp.delivery_address,
-            cp.assigned_distributor_id, cp.referred_by_distributor_id,
+            cp.assigned_distributor_id, cp.referred_by_distributor_id, cp.registered_by_distributor_id,
             ad.business_name AS assigned_distributor_name,
             adu.full_name AS assigned_distributor_full_name,
             (SELECT COUNT(*) FROM users u2 WHERE u2.email = u.email AND u2.deleted_at IS NOT NULL) AS prior_accounts_count
@@ -14,8 +20,9 @@ async function listCustomers() {
      LEFT JOIN customer_profiles cp ON cp.user_id = u.id
      LEFT JOIN distributors ad ON ad.id = cp.assigned_distributor_id
      LEFT JOIN users adu ON adu.id = ad.user_id
-     WHERE u.role = 'customer' AND u.deleted_at IS NULL
-     ORDER BY u.created_at DESC`
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY u.created_at DESC`,
+    values
   );
   return result.rows;
 }
@@ -90,10 +97,12 @@ async function getCustomerHistory(customerUserId) {
             ) AS paid_amount,
             COALESCE(
               (SELECT json_agg(json_build_object(
-                 'productName', pr.name, 'quantity', oi.quantity,
+                 'productName', pr.name, 'size', v.size, 'quantity', oi.quantity,
                  'unitPrice', oi.unit_price, 'lineTotal', oi.line_total
                ) ORDER BY pr.name)
-               FROM order_items oi JOIN products pr ON pr.id = oi.product_id
+               FROM order_items oi
+               JOIN products pr ON pr.id = oi.product_id
+               LEFT JOIN product_variants v ON v.id = oi.variant_id
                WHERE oi.order_id = o.id),
               '[]'
             ) AS items

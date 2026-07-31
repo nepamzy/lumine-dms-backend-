@@ -2,7 +2,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const customerService = require("./customer.service");
 
 const listHandler = asyncHandler(async (req, res) => {
-  const customers = await customerService.listCustomers();
+  const customers = await customerService.listCustomers({ distributorId: req.query.distributorId });
   res.json({ success: true, data: customers });
 });
 

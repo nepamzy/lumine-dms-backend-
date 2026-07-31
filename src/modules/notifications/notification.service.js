@@ -46,11 +46,16 @@ async function notifyOrderCreated(order, customerId) {
 }
 
 async function notifyPaymentSuccess(order, customerId) {
+  const percent = order.payment?.percent ?? 0;
+  const remaining = Math.max(0, Number(order.total_amount) - (order.payment?.totalPaid ?? 0));
   return notify({
     userId: customerId,
     type: "payment_success",
-    channel: "sms",
-    message: `Payment confirmed for order ${order.order_number}. Thank you for choosing Lumine!`,
+    channel: "email",
+    message:
+      `Payment received for order ${order.order_number}. You've now paid ${percent.toFixed(0)}% ` +
+      `(₦${(order.payment?.totalPaid ?? 0).toLocaleString()} of ₦${Number(order.total_amount).toLocaleString()}), ` +
+      `with ₦${remaining.toLocaleString()} remaining. You can view and download your receipt any time from your Lumine dashboard.`,
   });
 }
 

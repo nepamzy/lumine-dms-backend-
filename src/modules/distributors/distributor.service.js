@@ -2,6 +2,34 @@ const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { notifyDistributorApproved } = require("../notifications/notification.service");
 
+// Lazily required to avoid a require-cycle at module-load time (auth.service
+// doesn't depend on distributor.service, so this is safe either way, but
+// lazy keeps the dependency direction obvious).
+function authService() {
+  return require("../auth/auth.service");
+}
+
+// Sales-rep-only: registers a customer directly on their behalf — for
+// people without an Android phone / who can't do the signup flow
+// themselves. Same fields and rules as a normal customer signup (business
+// name still mandatory), except location isn't required and the customer
+// is auto-assigned straight to this rep.
+async function registerCustomerForRep(salesRepUserId, payload) {
+  const repResult = await db.query(
+    `SELECT id, distributor_type FROM distributors WHERE user_id = $1`,
+    [salesRepUserId]
+  );
+  if (repResult.rows.length === 0 || repResult.rows[0].distributor_type !== "sales_rep") {
+    throw new ApiError(403, "Only sales reps can register a customer directly");
+  }
+
+  return authService().register({
+    ...payload,
+    role: "customer",
+    registeredByDistributorId: repResult.rows[0].id,
+  });
+}
+
 async function listDistributors({ status, distributorType } = {}) {
   const conditions = ["u.deleted_at IS NULL"];
   const params = [];
@@ -175,10 +203,12 @@ async function getDistributorHistory(distributorId) {
             ) AS paid_amount,
             COALESCE(
               (SELECT json_agg(json_build_object(
-                 'productName', pr.name, 'quantity', oi.quantity,
+                 'productName', pr.name, 'size', v.size, 'quantity', oi.quantity,
                  'unitPrice', oi.unit_price, 'lineTotal', oi.line_total
                ) ORDER BY pr.name)
-               FROM order_items oi JOIN products pr ON pr.id = oi.product_id
+               FROM order_items oi
+               JOIN products pr ON pr.id = oi.product_id
+               LEFT JOIN product_variants v ON v.id = oi.variant_id
                WHERE oi.order_id = o.id),
               '[]'
             ) AS items
@@ -261,4 +291,5 @@ module.exports = {
   listMyCustomers,
   removeDistributor,
   listTrash,
+  registerCustomerForRep,
 };

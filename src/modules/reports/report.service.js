@@ -69,11 +69,36 @@ async function salesReport({ startDate, endDate } = {}) {
     params
   );
 
+  // Sales reps' own personal orders (never assigned to a distributor for
+  // delivery, since they ARE the buyer) — broken out separately so revenue
+  // from this new order type is visible, not just folded into the total.
+  const salesRepSelfOrders = await db.query(
+    `SELECT COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS revenue
+     FROM orders o
+     JOIN users u ON u.id = o.customer_id
+     JOIN distributors d ON d.user_id = u.id
+     WHERE u.role = 'distributor' AND d.distributor_type = 'sales_rep'
+       AND o.status = ANY($1) ${dateFilter}`,
+    params
+  );
+
+  // Customer orders currently inside the 65%-on-arrival payment reminder
+  // window (see order.service.js confirmReceived) and still not fully paid.
+  const pendingPaymentReminders = await db.query(
+    `SELECT COUNT(*) AS count
+     FROM orders o
+     WHERE o.payment_due_at IS NOT NULL
+       AND o.status != 'cancelled'
+       AND COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) < o.total_amount`
+  );
+
   return {
     summary: summary.rows[0],
     byState: byState.rows,
     byProduct: byProduct.rows,
     byDistributor: byDistributor.rows,
+    salesRepSelfOrders: salesRepSelfOrders.rows[0],
+    pendingPaymentReminders: Number(pendingPaymentReminders.rows[0].count),
   };
 }
 

@@ -47,7 +47,7 @@ async function findClosestDistributor(client, { state, localGovernment }) {
 
 const SALT_ROUNDS = 12;
 
-async function register({ fullName, email, phone, password, role, state, latitude, longitude, localGovernment, extra = {} }) {
+async function register({ fullName, email, phone, password, role, state, latitude, longitude, localGovernment, extra = {}, registeredByDistributorId } = {}) {
   if (!["customer", "distributor"].includes(role)) {
     // Admins are created directly in the database / by another admin, never via public signup
     throw new ApiError(400, "Invalid role for self-registration");
@@ -56,8 +56,11 @@ async function register({ fullName, email, phone, password, role, state, latitud
   // Location is mandatory for Customers and Sales Reps — they can't sign
   // up without granting it. A true Distributor is exempt (map shows them
   // if/when a location happens to be on file, but it's never required).
+  // EXCEPTION: a sales rep registering a customer who has no Android
+  // phone can't grant browser geolocation on the customer's behalf, so
+  // that path skips this requirement entirely (location stays null).
   const distributorTypeForCheck = role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : null;
-  const locationRequired = role === "customer" || distributorTypeForCheck === "sales_rep";
+  const locationRequired = !registeredByDistributorId && (role === "customer" || distributorTypeForCheck === "sales_rep");
   if (locationRequired && (latitude == null || longitude == null)) {
     throw new ApiError(400, "Location access is required to sign up as a customer or sales rep. Please allow location access and try again.");
   }
@@ -114,10 +117,14 @@ async function register({ fullName, email, phone, password, role, state, latitud
     } else if (role === "customer") {
       // Referral link (?ref=CODE) takes priority. If the customer didn't come
       // through one, try to auto-assign the closest distributor by LGA/state.
+      // A sales rep registering the customer directly (no-phone provision)
+      // always wins over both — they're assigned straight to that rep.
       let assignedDistributorId = null;
       let referredByDistributorId = null;
 
-      if (extra.referralCode) {
+      if (registeredByDistributorId) {
+        assignedDistributorId = registeredByDistributorId;
+      } else if (extra.referralCode) {
         const referrer = await client.query(
           `SELECT d.id
            FROM distributors d
@@ -136,8 +143,8 @@ async function register({ fullName, email, phone, password, role, state, latitud
       }
 
       await client.query(
-        `INSERT INTO customer_profiles (user_id, business_name, customer_type, delivery_address, assigned_distributor_id, referred_by_distributor_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO customer_profiles (user_id, business_name, customer_type, delivery_address, assigned_distributor_id, referred_by_distributor_id, registered_by_distributor_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           user.id,
           extra.businessName || null,
@@ -145,6 +152,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
           extra.deliveryAddress,
           assignedDistributorId,
           referredByDistributorId,
+          registeredByDistributorId || null,
         ]
       );
     }

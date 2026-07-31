@@ -26,6 +26,18 @@ router.get(
   })
 );
 
+// No-Android-phone provision: a sales rep fills out the same fields a
+// customer would, on the customer's behalf.
+router.post(
+  "/me/customers/register",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const user = await service.registerCustomerForRep(req.user.id, req.body);
+    res.status(201).json({ success: true, data: user });
+  })
+);
+
 router.use(authenticate, authorize("admin"));
 
 router.get(

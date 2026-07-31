@@ -59,9 +59,11 @@ const assignDistributorHandler = asyncHandler(async (req, res) => {
 });
 
 const logPaymentHandler = asyncHandler(async (req, res) => {
-  const { amount, note } = req.body;
-  if (!amount) throw new ApiError(400, "amount is required");
-  const order = await orderService.logPayment(req.params.id, Number(amount), req.user, note);
+  const { amount, note, percentOfTotal } = req.body;
+  if (!amount && !percentOfTotal) throw new ApiError(400, "amount or percentOfTotal is required");
+  const order = await orderService.logPayment(req.params.id, amount ? Number(amount) : undefined, req.user, note, {
+    percentOfTotal: percentOfTotal ? Number(percentOfTotal) : undefined,
+  });
   res.json({ success: true, data: order });
 });
 

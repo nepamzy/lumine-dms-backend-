@@ -1,7 +1,7 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { reserveStockFEFO } = require("../products/product.service");
-const { notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery } = require("../notifications/notification.service");
+const { notify, notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery, notifyPaymentSuccess } = require("../notifications/notification.service");
 
 function generateOrderNumber() {
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -14,6 +14,15 @@ const DISTRIBUTOR_MIN_PAYMENT_PERCENT = 70; // per-payment floor for distributor
 const DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT = 85; // must reach this on current order before placing another
 const CUSTOMER_NEXT_ORDER_MIN_PERCENT = 100; // must be fully paid before placing another
 const HALF_PACK_UNITS = { "35cl": 12, "50cl": 12, "1L": 6 }; // must match frontend src/utils/packSizes.js
+
+// A buyer's order-level "kind" for pricing/payment-rule purposes, derived
+// from the raw role + distributor_type columns joined onto an order row
+// (aliased as buyer_role / buyer_distributor_type everywhere this is used).
+function resolveBuyerKindFromRow(row) {
+  if (row.buyer_role === "distributor" && row.buyer_distributor_type === "sales_rep") return "salesRepSelf";
+  if (row.buyer_role === "distributor") return "distributor";
+  return "customer";
+}
 const EXPIRY_WINDOW_DAYS = 50; // set on the order the moment it's confirmed "on transport"
 const EXPIRY_RED_DAYS = 35; // <= this many days left = red (close to expiring)
 const EXPIRY_YELLOW_DAYS = 40; // <= this many days left (and > red) = yellow (worth watching)
@@ -42,9 +51,10 @@ async function findDistributorForState(client, state) {
   return result.rows[0]?.id || null;
 }
 
-// A buyer can be a real customer, or a "true" distributor buying for
-// themselves (never a sales rep — sales reps place orders on a customer's
-// behalf but never own one). Returns { id, state, kind: 'customer'|'distributor' }.
+// A buyer can be: a real customer, a "true" distributor buying for
+// themselves, or (new) a sales rep buying for THEIR OWN personal order —
+// distinct from a sales rep placing an order on a customer's behalf.
+// Returns { id, state, kind: 'customer'|'distributor'|'salesRepSelf' }.
 async function resolveBuyer(client, buyerId) {
   const result = await client.query(
     `SELECT u.id, u.state, u.role, d.distributor_type
@@ -60,14 +70,18 @@ async function resolveBuyer(client, buyerId) {
   if (row.role === "distributor" && row.distributor_type === "distributor") {
     return { id: row.id, state: row.state, kind: "distributor" };
   }
+  if (row.role === "distributor" && row.distributor_type === "sales_rep") {
+    return { id: row.id, state: row.state, kind: "salesRepSelf" };
+  }
   throw new ApiError(403, "Only customers and distributors can place their own orders");
 }
 
 // Blocks placing a new order until the buyer's existing orders clear the
-// required payment threshold — 100% for customers, 85% for distributors.
-// Sales reps never buy, so they're never subject to this.
+// required payment threshold — 100% for customers and sales reps buying
+// for themselves, 85% for true distributors.
 async function assertCanPlaceOrder(client, buyerId, kind) {
-  const threshold = kind === "distributor" ? DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT : CUSTOMER_NEXT_ORDER_MIN_PERCENT;
+  const threshold =
+    kind === "distributor" ? DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT : CUSTOMER_NEXT_ORDER_MIN_PERCENT;
 
   const result = await client.query(
     `SELECT o.id, o.order_number, o.total_amount,
@@ -95,6 +109,7 @@ async function assertCanPlaceOrder(client, buyerId, kind) {
 // always price and reserve stock identically.
 async function buildOrderItemRows(client, buyer, items) {
   let totalAmount = 0;
+  let totalPacks = 0;
   const orderItemRows = []; // { productId, variantId, batchId, quantity, unitPrice }
 
   for (const item of items) {
@@ -137,6 +152,7 @@ async function buildOrderItemRows(client, buyer, items) {
     // themselves gets the bulk pack-count discount tiers.
     const packSize = halfPackUnit * 2;
     const packs = item.quantity / packSize;
+    totalPacks += packs;
     let pricePerPack = Number(variant.pack_price);
 
     if (buyer.kind === "distributor") {
@@ -166,6 +182,14 @@ async function buildOrderItemRows(client, buyer, items) {
       });
       totalAmount += allocation.quantity * unitPrice;
     }
+  }
+
+  const SALES_REP_MAX_PACKS = 5;
+  if (buyer.kind === "salesRepSelf" && totalPacks > SALES_REP_MAX_PACKS) {
+    throw new ApiError(
+      400,
+      `Sales rep orders are capped at ${SALES_REP_MAX_PACKS} packs total across all products (this order is ${totalPacks} packs).`
+    );
   }
 
   return { orderItemRows, totalAmount };
@@ -287,9 +311,21 @@ function validatePaymentAmount(order, amount) {
   if (order.payment.totalPaid >= Number(order.total_amount)) {
     throw new ApiError(400, "This order is already fully paid");
   }
+
+  const wouldBeTotal = order.payment.totalPaid + Number(amount);
+  const wouldCompleteOrder = wouldBeTotal >= Number(order.total_amount);
+
+  // A sales rep's own personal order must be paid 100% upfront — no
+  // partial/installment payments at all, ever. Any amount that wouldn't
+  // fully settle the order is rejected outright.
+  if (order.buyerKind === "salesRepSelf" && !wouldCompleteOrder) {
+    throw new ApiError(
+      400,
+      "Sales rep orders must be paid in full upfront — partial payments aren't allowed on this order type."
+    );
+  }
+
   if (order.buyerKind === "distributor") {
-    const wouldBeTotal = order.payment.totalPaid + Number(amount);
-    const wouldCompleteOrder = wouldBeTotal >= Number(order.total_amount);
     const minPayment = (DISTRIBUTOR_MIN_PAYMENT_PERCENT / 100) * Number(order.total_amount);
     if (Number(amount) < minPayment && !wouldCompleteOrder) {
       throw new ApiError(
@@ -309,7 +345,7 @@ function computeStage(order, buyerKind) {
   const transport = !!order.transport_confirmed_at;
 
   const received =
-    buyerKind === "distributor"
+    buyerKind === "distributor" || buyerKind === "salesRepSelf"
       ? {
           admin: !!order.received_confirmed_admin_at,
           buyer: !!order.received_confirmed_buyer_at,
@@ -340,7 +376,7 @@ async function getOrderById(id) {
   );
   if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
   const order = orderResult.rows[0];
-  const buyerKind = order.buyer_role === "distributor" ? "distributor" : "customer";
+  const buyerKind = resolveBuyerKindFromRow(order);
 
   const itemsResult = await db.query(
     `SELECT oi.*, p.name AS product_name, p.sku, b.batch_number, b.expiry_date, v.size AS variant_size
@@ -355,8 +391,9 @@ async function getOrderById(id) {
   const payment = await getPaymentSummary(id, order.total_amount);
   const stage = computeStage(order, buyerKind);
   const expiry = getExpiryInfo(order.expiry_date);
+  const paymentDue = getPaymentDueInfo({ ...order, payment });
 
-  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry };
+  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry, paymentDue };
 }
 
 // Customers see only their own orders; distributors see only assigned orders; admins see all
@@ -404,7 +441,7 @@ async function listOrders(user, { status } = {}) {
   );
   return result.rows.map((row) => ({
     ...row,
-    buyerKind: row.buyer_role === "distributor" ? "distributor" : "customer",
+    buyerKind: resolveBuyerKindFromRow(row),
     paymentPercent: Number(row.total_amount) > 0 ? (Number(row.paid_amount) / Number(row.total_amount)) * 100 : 0,
   }));
 }
@@ -520,7 +557,7 @@ async function editOrderItems(orderId, items, actingUser) {
       throw new ApiError(400, "This order has entered production and can no longer be edited");
     }
 
-    const buyerKind = order.buyer_role === "distributor" ? "distributor" : "customer";
+    const buyerKind = resolveBuyerKindFromRow(order);
 
     // Release the old reservation before re-pricing/re-reserving the new items
     const oldItems = await client.query(
@@ -630,20 +667,47 @@ async function assignDistributor(orderId, distributorId) {
 // Real buyer-facing payments always go through Paystack via
 // initializePaystackPayment / confirmPaystackPayment below, so they only
 // ever count once the money is actually confirmed received.
-async function logPayment(orderId, amount, actingUser, note) {
+// Baseline sanity checks only — no role-specific floors. Used for admin's
+// manual authorization, which deliberately overrides the distributor 70%
+// floor and the sales-rep-must-pay-in-full-only rule: admin's word is
+// authoritative for every user type, full stop.
+function validateAdminPaymentAmount(order, amount) {
+  if (!(amount > 0)) throw new ApiError(400, "Payment amount must be greater than zero");
+  if (order.payment.totalPaid >= Number(order.total_amount)) {
+    throw new ApiError(400, "This order is already fully paid");
+  }
+}
+
+// Admin-only manual payment entry — this is the authoritative "admin's
+// word surpasses Paystack" path: it marks the payment successful
+// immediately, with no Paystack confirmation involved at all, and applies
+// to every buyer type (customer, distributor, sales rep) equally —
+// bypassing their normal payment-amount restrictions entirely. Accepts
+// either a raw amount or a percentOfTotal (e.g. 40 for 40%), so admin can
+// enter whichever is more convenient — percentOfTotal is converted to a
+// naira amount against the order's total before validation.
+async function logPayment(orderId, amount, actingUser, note, { percentOfTotal } = {}) {
   if (actingUser.role !== "admin") {
     throw new ApiError(403, "Payments must go through Paystack — only admin can log a manual entry");
   }
 
   const order = await getOrderById(orderId);
-  validatePaymentAmount(order, amount);
+
+  let resolvedAmount = amount;
+  if (percentOfTotal != null && percentOfTotal > 0) {
+    resolvedAmount = (Number(percentOfTotal) / 100) * Number(order.total_amount);
+  }
+
+  validateAdminPaymentAmount(order, resolvedAmount);
 
   await db.query(
     `INSERT INTO order_payments (order_id, amount, recorded_by, note, status) VALUES ($1, $2, $3, $4, 'successful')`,
-    [orderId, amount, actingUser.id, note || null]
+    [orderId, resolvedAmount, actingUser.id, note || null]
   );
 
-  return getOrderById(orderId);
+  const updatedOrder = await getOrderById(orderId);
+  notifyPaymentSuccess(updatedOrder, updatedOrder.customer_id).catch(() => {});
+  return updatedOrder;
 }
 
 // Admin-only: moves an order to "on transport." Also stamps expiry_date =
@@ -672,6 +736,16 @@ function getExpiryInfo(expiryDate) {
   const daysRemaining = Math.ceil((new Date(expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
   const band = daysRemaining <= EXPIRY_RED_DAYS ? "red" : daysRemaining <= EXPIRY_YELLOW_DAYS ? "yellow" : "green";
   return { daysRemaining, band };
+}
+
+// Days remaining on the customer's 2-week post-arrival payment window
+// (see confirmReceived's 65% reminder). Null once the order is fully paid
+// or if no reminder was ever triggered.
+function getPaymentDueInfo(order) {
+  if (!order.payment_due_at) return null;
+  if (order.payment.percent >= 100) return null;
+  const daysRemaining = Math.ceil((new Date(order.payment_due_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  return { dueAt: order.payment_due_at, daysRemaining, overdue: daysRemaining < 0 };
 }
 
 // Multi-party "received" confirmation. `as` lets an admin tick a box on
@@ -713,6 +787,9 @@ async function confirmReceived(orderId, actingUser, { as } = {}) {
     throw new ApiError(400, "Unable to determine which confirmation box to tick");
   }
 
+  const wasFirstReceivedConfirmation =
+    !order.received_confirmed_admin_at && !order.received_confirmed_staff_at && !order.received_confirmed_buyer_at;
+
   const setClauses = [`${column} = now()`, "updated_at = now()"];
   const values = [orderId];
   if (byColumn) {
@@ -720,11 +797,46 @@ async function confirmReceived(orderId, actingUser, { as } = {}) {
     values.push(byUserId);
   }
 
+  // Customers must have paid at least 65% by the time the order arrives;
+  // sales reps buying for themselves must have paid 100% (no partial
+  // payments allowed on that order type at all). Either way, this is the
+  // moment ("arrival") to remind them if they haven't.
+  const PAYMENT_REMINDER_THRESHOLD_PERCENT = 65;
+  const PAYMENT_REMINDER_WINDOW_DAYS = 14;
+  const isCustomerShortfall =
+    order.buyerKind === "customer" && order.payment.percent < PAYMENT_REMINDER_THRESHOLD_PERCENT;
+  const isSalesRepShortfall = order.buyerKind === "salesRepSelf" && order.payment.percent < 100;
+  const needsPaymentReminder = wasFirstReceivedConfirmation && (isCustomerShortfall || isSalesRepShortfall);
+
+  if (needsPaymentReminder) {
+    setClauses.push(`payment_due_at = now() + ($${values.length + 1} || ' days')::interval`);
+    values.push(PAYMENT_REMINDER_WINDOW_DAYS);
+  }
+
   const result = await db.query(
     `UPDATE orders SET ${setClauses.join(", ")} WHERE id = $1 RETURNING *`,
     values
   );
   if (result.rows.length === 0) throw new ApiError(404, "Order not found");
+
+  if (needsPaymentReminder) {
+    const remaining = Number(order.total_amount) - order.payment.totalPaid;
+    const message = isSalesRepShortfall
+      ? `Your Lumine order ${order.order_number} has arrived! Sales rep orders require 100% payment upfront — ` +
+        `please pay the remaining ₦${remaining.toLocaleString()} as soon as possible from your order page. ` +
+        `You won't be able to place another order until this one is fully paid.`
+      : `Your Lumine order ${order.order_number} has arrived! You've paid ${order.payment.percent.toFixed(0)}% so far — ` +
+        `at least ${PAYMENT_REMINDER_THRESHOLD_PERCENT}% is required upon arrival. Please pay the remaining balance ` +
+        `of ₦${remaining.toLocaleString()} within the next ${PAYMENT_REMINDER_WINDOW_DAYS} days, in up to two installments, ` +
+        `from your order page.`;
+    notify({
+      userId: order.customer_id,
+      type: "payment_reminder",
+      channel: "email",
+      message,
+    }).catch(() => {});
+  }
+
   return getOrderById(orderId);
 }
 
