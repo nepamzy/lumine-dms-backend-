@@ -168,7 +168,13 @@ async function register({ fullName, email, phone, password, role, state, latitud
 }
 
 async function login({ email, password }) {
-  const result = await db.query("SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL", [email]);
+  const result = await db.query(
+    `SELECT u.*, cp.registered_by_distributor_id
+     FROM users u
+     LEFT JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.email = $1 AND u.deleted_at IS NULL`,
+    [email]
+  );
   const user = result.rows[0];
 
   if (!user) {
@@ -178,6 +184,17 @@ async function login({ email, password }) {
   const passwordMatches = await bcrypt.compare(password, user.password_hash);
   if (!passwordMatches) {
     throw new ApiError(401, "Incorrect email or password");
+  }
+
+  // Customers a sales rep registered directly (no-Android-phone provision)
+  // are contact records only — they never get a real functioning account.
+  // The sales rep places and pays for their own orders on these
+  // customers' behalf entirely outside the login system.
+  if (user.registered_by_distributor_id) {
+    throw new ApiError(
+      403,
+      "This account was registered by a sales rep and doesn't have its own login — orders for it are placed by that sales rep."
+    );
   }
 
   if (user.status === "suspended") {

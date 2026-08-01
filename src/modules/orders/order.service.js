@@ -57,14 +57,25 @@ async function findDistributorForState(client, state) {
 // Returns { id, state, kind: 'customer'|'distributor'|'salesRepSelf' }.
 async function resolveBuyer(client, buyerId) {
   const result = await client.query(
-    `SELECT u.id, u.state, u.role, d.distributor_type
+    `SELECT u.id, u.state, u.role, d.distributor_type, cp.registered_by_distributor_id
      FROM users u
      LEFT JOIN distributors d ON d.user_id = u.id
+     LEFT JOIN customer_profiles cp ON cp.user_id = u.id
      WHERE u.id = $1`,
     [buyerId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "Buyer not found");
   const row = result.rows[0];
+
+  // Customers a sales rep registered directly (no-Android-phone provision)
+  // are contact records only — orders for them are always the sales rep's
+  // OWN order (self-order), never placed "on behalf of" this record.
+  if (row.role === "customer" && row.registered_by_distributor_id) {
+    throw new ApiError(
+      400,
+      "This customer was registered by a sales rep and can't receive orders directly — place this as your own order instead."
+    );
+  }
 
   if (row.role === "customer") return { id: row.id, state: row.state, kind: "customer" };
   if (row.role === "distributor" && row.distributor_type === "distributor") {

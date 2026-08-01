@@ -32,10 +32,18 @@ async function registerCustomerForRep(salesRepUserId, payload) {
     throw new ApiError(403, "Only sales reps can register a customer directly");
   }
 
-  const { businessName, customerType, deliveryAddress, ...rest } = payload;
+  const { businessName, customerType, deliveryAddress, password, ...rest } = payload;
+
+  // This is a contact record, not a functioning account — the customer
+  // never logs in themselves, so the password is random and never shared
+  // anywhere. login() also explicitly blocks these accounts as a second
+  // layer, but not issuing a real password is the first line of defense.
+  const crypto = require("crypto");
+  const randomPassword = crypto.randomBytes(24).toString("hex");
 
   return authService().register({
     ...rest,
+    password: randomPassword,
     role: "customer",
     extra: { businessName, customerType, deliveryAddress },
     registeredByDistributorId: repResult.rows[0].id,
@@ -267,7 +275,7 @@ async function listMyCustomers(userId) {
     `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name
      FROM customer_profiles cp
      JOIN users u ON u.id = cp.user_id
-     WHERE cp.assigned_distributor_id = $1
+     WHERE cp.assigned_distributor_id = $1 AND cp.registered_by_distributor_id IS NULL
      ORDER BY u.full_name ASC`,
     [dist.id]
   );
