@@ -141,6 +141,97 @@ async function addBatch(productId, { batchNumber, quantity, expiryDate }) {
   return result.rows[0];
 }
 
+// Automated daily batch creation — meant to be called once every 24hrs by
+// an external scheduler (Render Cron Job, or any HTTP-hitting cron
+// service) hitting POST /products/run-daily-batch. Idempotent: calling it
+// again the same calendar day is a safe no-op.
+//
+// For each active product:
+//   1. Any of ITS OWN previous auto-generated batches still holding stock
+//      get zeroed out — that's the "unsold" leftover being wiped. Batches
+//      that already had stock consumed by real orders keep those
+//      order_items rows untouched (we only ever zero quantity_on_hand,
+//      never delete/alter the batch or its order history).
+//   2. A fresh batch of 500 packs is created.
+//
+// PACK -> BOTTLE conversion: a batch belongs to a whole PRODUCT (flavor),
+// not one size, and pack sizes differ by size (1L = 12 bottles/pack, 50cl
+// & 35cl = 24 bottles/pack). Since a single batch has no size of its own,
+// "500 packs" is converted using the 24-bottle/pack convention (the size
+// most of the catalog uses) = 12,000 bottles. Flag this back to the team —
+// if a different basis was intended, this line is the one to change.
+const AUTO_BATCH_PACKS_PER_DAY = 500;
+const AUTO_BATCH_BOTTLES_PER_PACK = 24;
+const AUTO_BATCH_SHELF_LIFE_DAYS = 60; // assumption — adjust if actual shelf life differs
+
+async function runDailyBatchCreation() {
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10); // YYYY-MM-DD, for the UNIQUE run_date check
+
+  const existingRun = await db.query(`SELECT sequence_no FROM auto_batch_runs WHERE run_date = $1`, [todayStr]);
+  if (existingRun.rows.length > 0) {
+    return { alreadyRanToday: true, sequenceNo: existingRun.rows[0].sequence_no };
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const seqResult = await client.query(
+      `INSERT INTO auto_batch_runs (run_date, sequence_no)
+       VALUES ($1, COALESCE((SELECT MAX(sequence_no) FROM auto_batch_runs), 0) + 1)
+       ON CONFLICT (run_date) DO NOTHING
+       RETURNING sequence_no`,
+      [todayStr]
+    );
+    if (seqResult.rows.length === 0) {
+      // Another concurrent call won the race and already inserted today's run
+      await client.query("ROLLBACK");
+      const raceCheck = await db.query(`SELECT sequence_no FROM auto_batch_runs WHERE run_date = $1`, [todayStr]);
+      return { alreadyRanToday: true, sequenceNo: raceCheck.rows[0]?.sequence_no };
+    }
+    const sequenceNo = seqResult.rows[0].sequence_no;
+
+    // Format: no.(4 digits) + day-of-month(no leading zero) + last-2-digits-of-year
+    const batchNumber = `${String(sequenceNo).padStart(4, "0")}${today.getDate()}${String(today.getFullYear() % 100).padStart(2, "0")}`;
+
+    const bottlesPerBatch = AUTO_BATCH_PACKS_PER_DAY * AUTO_BATCH_BOTTLES_PER_PACK;
+    const expiryDate = new Date(today.getTime() + AUTO_BATCH_SHELF_LIFE_DAYS * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+
+    const products = await client.query(
+      `SELECT id FROM products WHERE is_active = true AND deleted_at IS NULL`
+    );
+
+    const created = [];
+    for (const product of products.rows) {
+      // Wipe unsold stock from this product's previous auto-generated batches
+      await client.query(
+        `UPDATE product_batches SET quantity_on_hand = 0
+         WHERE product_id = $1 AND is_auto_generated = true AND quantity_on_hand > 0`,
+        [product.id]
+      );
+
+      const batchResult = await client.query(
+        `INSERT INTO product_batches (product_id, batch_number, quantity_on_hand, expiry_date, is_auto_generated)
+         VALUES ($1, $2, $3, $4, true)
+         ON CONFLICT (product_id, batch_number) DO NOTHING
+         RETURNING *`,
+        [product.id, batchNumber, bottlesPerBatch, expiryDate]
+      );
+      if (batchResult.rows.length > 0) created.push(batchResult.rows[0]);
+    }
+
+    await client.query("COMMIT");
+    return { alreadyRanToday: false, sequenceNo, batchNumber, productsUpdated: created.length, batches: created };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 // Returns batches expiring within `days`, soonest first — powers the
 // admin "expiring soon" dashboard alert.
 async function getExpiringBatches(days = 30) {
@@ -190,7 +281,8 @@ async function reserveStockFEFO(client, productId, quantityNeeded) {
 
 async function getVariantsWithTiers(productId) {
   const variants = await db.query(
-    `SELECT * FROM product_variants WHERE product_id = $1 ORDER BY size`,
+    `SELECT * FROM product_variants WHERE product_id = $1
+     ORDER BY CASE size WHEN '1L' THEN 1 WHEN '50cl' THEN 2 WHEN '35cl' THEN 3 ELSE 4 END`,
     [productId]
   );
   for (const variant of variants.rows) {
@@ -266,4 +358,5 @@ module.exports = {
   getVariantsWithTiers,
   createVariant,
   resolveTierPrice,
+  runDailyBatchCreation,
 };

@@ -107,11 +107,20 @@ async function assertCanPlaceOrder(client, buyerId, kind) {
 // FEFO stock for them. Shared by createOrder (new orders) and
 // editOrderItems (amending an existing pre-production order) so both
 // always price and reserve stock identically.
+//
+// IMPORTANT: for a distributor, the bulk-discount tier is picked ONCE using
+// the TOTAL pack count across every item in the order (all products/sizes
+// combined) — not each item's own individual pack count. That single tier
+// then applies to every line, each at its own product/size price within
+// that tier. This needed two passes: first tally every item's own pack
+// count to get the order-wide total, then price everything against it.
 async function buildOrderItemRows(client, buyer, items) {
   let totalAmount = 0;
   let totalPacks = 0;
   const orderItemRows = []; // { productId, variantId, batchId, quantity, unitPrice }
+  const resolvedItems = []; // pass-1 output, reused in pass 2 to avoid re-querying
 
+  // Pass 1 — validate every item and tally the order-wide pack count
   for (const item of items) {
     if (!item.variantId || !item.quantity || item.quantity <= 0) {
       throw new ApiError(400, "Each item needs a valid variantId and quantity > 0");
@@ -146,13 +155,27 @@ async function buildOrderItemRows(client, buyer, items) {
       );
     }
 
-    // Pricing is per PACK. Customers and sales reps (placedByUserId set,
-    // or a customer buying for themselves) always pay the flat pack
-    // price — no discount, ever. Only a true distributor buying for
-    // themselves gets the bulk pack-count discount tiers.
     const packSize = halfPackUnit * 2;
     const packs = item.quantity / packSize;
     totalPacks += packs;
+
+    resolvedItems.push({ item, variant, packSize, packs });
+  }
+
+  const SALES_REP_MAX_PACKS = 5;
+  if (buyer.kind === "salesRepSelf" && totalPacks > SALES_REP_MAX_PACKS) {
+    throw new ApiError(
+      400,
+      `Sales rep orders are capped at ${SALES_REP_MAX_PACKS} packs total across all products (this order is ${totalPacks} packs).`
+    );
+  }
+
+  // Pass 2 — price every item against the ORDER-WIDE total pack count
+  for (const { item, variant, packSize } of resolvedItems) {
+    // Pricing is per PACK. Customers and sales reps always pay the flat
+    // pack price — no discount, ever. Only a true distributor buying for
+    // themselves gets the bulk tier discount, and that tier is chosen
+    // using the combined pack count of the WHOLE order, not this item alone.
     let pricePerPack = Number(variant.pack_price);
 
     if (buyer.kind === "distributor") {
@@ -160,7 +183,7 @@ async function buildOrderItemRows(client, buyer, items) {
         `SELECT price FROM price_tiers
          WHERE variant_id = $1 AND min_qty <= $2 AND (max_qty IS NULL OR max_qty >= $2)
          ORDER BY min_qty DESC LIMIT 1`,
-        [item.variantId, packs]
+        [item.variantId, totalPacks]
       );
       if (tierResult.rows.length > 0) {
         pricePerPack = Number(tierResult.rows[0].price);
@@ -182,14 +205,6 @@ async function buildOrderItemRows(client, buyer, items) {
       });
       totalAmount += allocation.quantity * unitPrice;
     }
-  }
-
-  const SALES_REP_MAX_PACKS = 5;
-  if (buyer.kind === "salesRepSelf" && totalPacks > SALES_REP_MAX_PACKS) {
-    throw new ApiError(
-      400,
-      `Sales rep orders are capped at ${SALES_REP_MAX_PACKS} packs total across all products (this order is ${totalPacks} packs).`
-    );
   }
 
   return { orderItemRows, totalAmount };

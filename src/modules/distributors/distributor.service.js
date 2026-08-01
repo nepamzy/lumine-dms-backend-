@@ -23,9 +23,12 @@ async function registerCustomerForRep(salesRepUserId, payload) {
     throw new ApiError(403, "Only sales reps can register a customer directly");
   }
 
+  const { businessName, customerType, deliveryAddress, ...rest } = payload;
+
   return authService().register({
-    ...payload,
+    ...rest,
     role: "customer",
+    extra: { businessName, customerType, deliveryAddress },
     registeredByDistributorId: repResult.rows[0].id,
   });
 }

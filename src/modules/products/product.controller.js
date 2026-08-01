@@ -66,6 +66,11 @@ const createVariantHandler = asyncHandler(async (req, res) => {
   const variant = await productService.createVariant(req.params.id, { size, sku, imageUrl, tiers });
   res.status(201).json({ success: true, data: variant });
 });
+const runDailyBatchHandler = asyncHandler(async (req, res) => {
+  const result = await productService.runDailyBatchCreation();
+  res.json({ success: true, data: result });
+});
+
 module.exports = {
   listHandler,
   getOneHandler,
@@ -78,4 +83,5 @@ module.exports = {
   expiringHandler,
   getVariantsHandler,
   createVariantHandler,
+  runDailyBatchHandler,
 };
