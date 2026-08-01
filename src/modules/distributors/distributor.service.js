@@ -19,7 +19,16 @@ async function registerCustomerForRep(salesRepUserId, payload) {
     `SELECT id, distributor_type FROM distributors WHERE user_id = $1`,
     [salesRepUserId]
   );
-  if (repResult.rows.length === 0 || repResult.rows[0].distributor_type !== "sales_rep") {
+  const isSalesRep =
+    repResult.rows.length > 0 &&
+    String(repResult.rows[0].distributor_type || "").trim().toLowerCase() === "sales_rep";
+  if (!isSalesRep) {
+    console.error(
+      "registerCustomerForRep blocked:",
+      repResult.rows.length === 0
+        ? `no distributors row found for user_id ${salesRepUserId}`
+        : `distributor_type was "${repResult.rows[0].distributor_type}"`
+    );
     throw new ApiError(403, "Only sales reps can register a customer directly");
   }
 
