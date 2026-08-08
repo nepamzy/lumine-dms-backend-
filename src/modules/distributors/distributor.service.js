@@ -203,7 +203,7 @@ async function getReferralInfo(userId) {
 async function getDistributorHistory(distributorId) {
   const profileResult = await db.query(
     `SELECT d.id, d.business_name, d.approval_status, d.referral_code, d.distributor_type, d.created_at,
-            u.full_name, u.email, u.phone, u.state, u.local_government, u.status AS user_status,
+            u.full_name, u.email, u.phone, u.state, u.local_government, u.address, u.status AS user_status,
             t.name AS territory_name
      FROM distributors d
      JOIN users u ON u.id = d.user_id

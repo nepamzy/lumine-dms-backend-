@@ -53,16 +53,16 @@ async function register({ fullName, email, phone, password, role, state, latitud
     throw new ApiError(400, "Invalid role for self-registration");
   }
 
-  // Location is mandatory for Customers and Sales Reps — they can't sign
-  // up without granting it. A true Distributor is exempt (map shows them
-  // if/when a location happens to be on file, but it's never required).
+  // Location is mandatory for Customers, Sales Reps, AND Distributors —
+  // nobody signs up without granting it (previously Distributors were
+  // exempt; that exemption has been removed).
   // EXCEPTION: a sales rep registering a customer who has no Android
   // phone can't grant browser geolocation on the customer's behalf, so
   // that path skips this requirement entirely (location stays null).
   const distributorTypeForCheck = role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : null;
-  const locationRequired = !registeredByDistributorId && (role === "customer" || distributorTypeForCheck === "sales_rep");
+  const locationRequired = !registeredByDistributorId && (role === "customer" || role === "distributor");
   if (locationRequired && (latitude == null || longitude == null)) {
-    throw new ApiError(400, "Location access is required to sign up as a customer or sales rep. Please allow location access and try again.");
+    throw new ApiError(400, "Location access is required to sign up. Please allow location access and try again.");
   }
 
   // Business name is mandatory for Customers, but stays optional for
@@ -72,12 +72,19 @@ async function register({ fullName, email, phone, password, role, state, latitud
     throw new ApiError(400, "Business name is required to sign up as a customer");
   }
 
+  // Sales Reps and Distributors previously had no street-address field at
+  // all — now mandatory for both at signup (Customers already have their
+  // own "delivery address" field, so this doesn't apply to them).
+  if (!registeredByDistributorId && role === "distributor" && !String(extra.address || "").trim()) {
+    throw new ApiError(400, "Address is required to sign up as a sales rep or distributor");
+  }
+
   const existing = await db.query(
-    "SELECT id FROM users WHERE (email = $1 OR phone = $2) AND deleted_at IS NULL",
-    [email, phone]
+    "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
+    [email]
   );
   if (existing.rows.length > 0) {
-    throw new ApiError(409, "An account with this email or phone already exists");
+    throw new ApiError(409, "Cannot sign up with this email — an account with it already exists.");
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -87,8 +94,8 @@ async function register({ fullName, email, phone, password, role, state, latitud
     await client.query("BEGIN");
 
    const userResult = await client.query(
-      `INSERT INTO users (full_name, email, phone, password_hash, role, state, local_government, status, latitude, longitude, location_captured_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO users (full_name, email, phone, password_hash, role, state, local_government, status, latitude, longitude, location_captured_at, address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id, full_name, email, phone, role, state, local_government, status, created_at`,
       [
         fullName,
@@ -102,6 +109,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
         latitude || null,
         longitude || null,
         latitude && longitude ? new Date() : null,
+        extra.address || null,
       ]
     );
     const user = userResult.rows[0];
@@ -249,7 +257,7 @@ async function logout(refreshToken) {
 async function getCurrentUser(userId) {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.state, u.local_government, u.status, u.created_at,
-            u.location_captured_at,
+            u.location_captured_at, u.address, u.location_strikes,
             d.id AS distributor_id, d.referral_code, d.business_name AS distributor_business_name,
             d.distributor_type,
             d.approval_status,
@@ -265,13 +273,37 @@ async function getCurrentUser(userId) {
   if (result.rows.length === 0) throw new ApiError(404, "User not found");
   const user = result.rows[0];
 
-  // Customers and Sales Reps must have granted location — true Distributors
-  // are exempt. Existing accounts created before this requirement (or that
-  // slipped through without it) get re-prompted until they grant it.
-  user.needsLocationConsent =
-    !user.location_captured_at && (user.role === "customer" || user.distributor_type === "sales_rep");
+  // Customers, Sales Reps, AND Distributors must have granted location —
+  // nobody's exempt anymore. Existing accounts created before this
+  // requirement (or that slipped through without it) get re-prompted
+  // until they grant it.
+  user.needsLocationConsent = !user.location_captured_at && user.role !== "admin";
+
+  // Sales Reps and Distributors are prompted (dismissibly) to fill in a
+  // street address if they don't have one on file yet.
+  user.needsAddressPrompt = user.role === "distributor" && !user.address;
 
   return user;
+}
+
+// Called by the frontend when it detects location permission is no longer
+// granted for a Sales Rep or Distributor who'd previously set it up.
+// Reaching 5 strikes auto-suspends the account.
+async function registerLocationStrike(userId) {
+  const result = await db.query(
+    `UPDATE users SET location_strikes = location_strikes + 1
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING location_strikes`,
+    [userId]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "User not found");
+  const strikes = result.rows[0].location_strikes;
+
+  if (strikes >= 5) {
+    await db.query(`UPDATE users SET status = 'suspended' WHERE id = $1`, [userId]);
+  }
+
+  return { strikes, suspended: strikes >= 5 };
 }
 
 // Lets an authenticated user submit their current GPS position — used both
@@ -288,7 +320,7 @@ async function updateLocation(userId, { latitude, longitude }) {
   return getCurrentUser(userId);
 }
 async function updateProfile(userId, updates) {
-  const allowedUserFields = ["full_name", "phone", "state", "local_government"];
+  const allowedUserFields = ["full_name", "phone", "state", "local_government", "address"];
   const fields = [];
   const values = [];
   let i = 1;
@@ -367,4 +399,4 @@ async function acknowledgePaymentNotice(userId) {
   return result.rows[0];
 }
 
-module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation };
+module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation, registerLocationStrike };

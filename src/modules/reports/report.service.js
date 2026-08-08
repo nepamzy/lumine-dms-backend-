@@ -196,4 +196,58 @@ async function deliveryReport({ startDate, endDate } = {}) {
   };
 }
 
-module.exports = { salesReport, inventoryReport, deliveryReport };
+// One row per Sales Rep / Distributor: their state, total revenue, and a
+// completed/pending order split (completed = 100% paid). This single
+// dataset powers the whole Overview revenue drill-down (state -> rep type
+// -> individual -> their orders) without a separate API call per level.
+//
+// "Distributor" revenue = orders where they are the buyer themselves.
+// "Sales Rep" revenue = orders they've generated for their customers
+// (assigned to them for delivery) — their own personal orders are tracked
+// separately under salesRepSelfOrders in salesReport().
+async function repRevenueBreakdown({ startDate, endDate } = {}) {
+  validateDateRange(startDate, endDate);
+  const paidStatuses = ["paid", "processing", "out_for_delivery", "delivered"];
+
+  const params = [paidStatuses];
+  let dateFilter = "";
+  if (startDate) {
+    params.push(startDate);
+    dateFilter += ` AND o.created_at >= $${params.length}`;
+  }
+  if (endDate) {
+    params.push(endDate);
+    dateFilter += ` AND o.created_at <= $${params.length}`;
+  }
+
+  const result = await db.query(
+    `SELECT
+       d.id AS distributor_id, d.distributor_type, d.business_name,
+       u.id AS user_id, u.full_name, u.state,
+       COUNT(*) AS order_count,
+       COUNT(*) FILTER (
+         WHERE COALESCE(paid.total, 0) >= o.total_amount
+       ) AS completed_count,
+       COUNT(*) FILTER (
+         WHERE COALESCE(paid.total, 0) < o.total_amount
+       ) AS pending_count,
+       COALESCE(SUM(o.total_amount), 0) AS revenue
+     FROM distributors d
+     JOIN users u ON u.id = d.user_id
+     JOIN orders o ON (
+       (d.distributor_type = 'distributor' AND o.customer_id = d.user_id)
+       OR (d.distributor_type = 'sales_rep' AND o.distributor_id = d.id)
+     )
+     LEFT JOIN LATERAL (
+       SELECT SUM(amount) AS total FROM order_payments WHERE order_id = o.id AND status = 'successful'
+     ) paid ON true
+     WHERE o.status = ANY($1) ${dateFilter}
+     GROUP BY d.id, d.distributor_type, d.business_name, u.id, u.full_name, u.state
+     ORDER BY revenue DESC`,
+    params
+  );
+
+  return result.rows;
+}
+
+module.exports = { salesReport, inventoryReport, deliveryReport, repRevenueBreakdown };

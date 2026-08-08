@@ -48,4 +48,10 @@ const deliveryHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: report });
 });
 
-module.exports = { salesHandler, inventoryHandler, deliveryHandler };
+const repRevenueHandler = asyncHandler(async (req, res) => {
+  const { startDate, endDate } = req.query;
+  const rows = await reportService.repRevenueBreakdown({ startDate, endDate });
+  res.json({ success: true, data: rows });
+});
+
+module.exports = { salesHandler, inventoryHandler, deliveryHandler, repRevenueHandler };

@@ -101,6 +101,11 @@ const updateLocationHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: user });
 });
 
+const locationStrikeHandler = asyncHandler(async (req, res) => {
+  const result = await authService.registerLocationStrike(req.user.id);
+  res.json({ success: true, data: result });
+});
+
 module.exports = {
   registerHandler,
   loginHandler,
@@ -111,4 +116,5 @@ module.exports = {
   changePasswordHandler,
   acknowledgePaymentNoticeHandler,
   updateLocationHandler,
+  locationStrikeHandler,
 };

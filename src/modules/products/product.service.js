@@ -74,10 +74,21 @@ async function deleteBatch(productId, batchId) {
     [batchId, productId]
   );
   if (batch.rows.length === 0) throw new ApiError(404, "Batch not found for this product");
-  if (Number(batch.rows[0].quantity_on_hand) > 0) {
-    throw new ApiError(400, "Only out-of-stock batches (0 quantity) can be deleted");
+  // Admin can force-delete a batch even with stock remaining — same
+  // "admin's word is authoritative" pattern as manual payment authorization.
+  // The frontend confirm dialog makes this explicit before it happens.
+  try {
+    await db.query(`DELETE FROM product_batches WHERE id = $1`, [batchId]);
+  } catch (err) {
+    if (err.code === "23503") {
+      // FK violation — real orders reference this batch's history
+      throw new ApiError(
+        400,
+        "This batch can't be deleted — it's referenced by real order history. Set its quantity to 0 instead to stop it being sold further."
+      );
+    }
+    throw err;
   }
-  await db.query(`DELETE FROM product_batches WHERE id = $1`, [batchId]);
   return { id: batchId };
 }
 
@@ -244,7 +255,11 @@ async function getExpiringBatches(days = 30) {
      ORDER BY b.expiry_date ASC`,
     [days]
   );
-  return result.rows;
+  return result.rows.map((row) => {
+    const daysRemaining = Math.ceil((new Date(row.expiry_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    const band = daysRemaining <= 7 ? "red" : daysRemaining <= 14 ? "yellow" : "green";
+    return { ...row, daysRemaining, band };
+  });
 }
 
 // FEFO stock reservation: pulls from the batch expiring soonest first.

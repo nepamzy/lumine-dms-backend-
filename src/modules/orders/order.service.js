@@ -338,6 +338,11 @@ function validatePaymentAmount(order, amount) {
     throw new ApiError(400, "This order is already fully paid");
   }
 
+  const remaining = Number(order.total_amount) - order.payment.totalPaid;
+  if (Number(amount) > remaining) {
+    throw new ApiError(400, `Payment amount can't exceed the remaining balance of ₦${remaining.toLocaleString()}`);
+  }
+
   const wouldBeTotal = order.payment.totalPaid + Number(amount);
   const wouldCompleteOrder = wouldBeTotal >= Number(order.total_amount);
 
@@ -701,6 +706,10 @@ function validateAdminPaymentAmount(order, amount) {
   if (!(amount > 0)) throw new ApiError(400, "Payment amount must be greater than zero");
   if (order.payment.totalPaid >= Number(order.total_amount)) {
     throw new ApiError(400, "This order is already fully paid");
+  }
+  const remaining = Number(order.total_amount) - order.payment.totalPaid;
+  if (Number(amount) > remaining) {
+    throw new ApiError(400, `Amount can't exceed the remaining balance of ₦${remaining.toLocaleString()}`);
   }
 }
 

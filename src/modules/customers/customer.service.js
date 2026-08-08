@@ -9,7 +9,7 @@ async function listCustomers({ distributorId } = {}) {
     values.push(distributorId);
   }
   const result = await db.query(
-    `SELECT u.id, u.full_name, u.email, u.phone, u.state, u.local_government, u.status, u.created_at,
+    `SELECT u.id, u.full_name, u.email, u.phone, u.state, u.local_government, u.address, u.status, u.created_at,
             u.latitude, u.longitude,
             cp.business_name, cp.customer_type, cp.delivery_address,
             cp.assigned_distributor_id, cp.referred_by_distributor_id, cp.registered_by_distributor_id,
@@ -71,7 +71,7 @@ async function removeCustomer(customerUserId) {
 // customer-detail view.
 async function getCustomerHistory(customerUserId) {
   const profileResult = await db.query(
-    `SELECT u.id, u.full_name, u.email, u.phone, u.state, u.local_government, u.status, u.created_at,
+    `SELECT u.id, u.full_name, u.email, u.phone, u.state, u.local_government, u.address, u.status, u.created_at,
             cp.business_name, cp.customer_type, cp.delivery_address,
             cp.assigned_distributor_id, cp.referred_by_distributor_id,
             ad.business_name AS assigned_distributor_name,
