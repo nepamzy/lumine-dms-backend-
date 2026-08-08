@@ -10,14 +10,26 @@ function validateDateRange(startDate, endDate) {
   }
 }
 
+// IMPORTANT: orders.status is a manually-managed FULFILLMENT workflow field
+// (pending -> paid -> processing -> out_for_delivery -> delivered) that is
+// NEVER automatically updated when a payment is logged — logPayment() and
+// the Paystack webhook only ever touch order_payments, not orders.status.
+// In practice almost every order sits at 'pending' forever unless an admin
+// separately clicks through the fulfillment pipeline by hand.
+//
+// That means filtering revenue/order reports on status IN ('paid', ...)
+// silently excludes the vast majority of real, paid-for orders — this was
+// the actual cause of the Overview dashboard showing 0s across the board.
+// Every query below now counts any order that isn't CANCELLED, and
+// calculates revenue from the ACTUAL successful payments recorded against
+// each order (via order_payments), not the order's full total_amount —
+// so revenue reflects money genuinely collected, not just value placed.
+
 // Revenue and order counts, broken down by state and by product.
-// Only counts orders that actually reached 'paid' or further — pending/
-// cancelled orders never happened from a revenue standpoint.
 async function salesReport({ startDate, endDate } = {}) {
   validateDateRange(startDate, endDate);
-  const paidStatuses = ["paid", "processing", "out_for_delivery", "delivered"];
 
-  const params = [paidStatuses];
+  const params = [];
   let dateFilter = "";
   if (startDate) {
     params.push(startDate);
@@ -28,18 +40,20 @@ async function salesReport({ startDate, endDate } = {}) {
     dateFilter += ` AND o.created_at <= $${params.length}`;
   }
 
+  const paidSubquery = `COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0)`;
+
   const summary = await db.query(
-    `SELECT COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS total_revenue
+    `SELECT COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS total_revenue
      FROM orders o
-     WHERE o.status = ANY($1) ${dateFilter}`,
+     WHERE o.status != 'cancelled' ${dateFilter}`,
     params
   );
 
   const byState = await db.query(
-    `SELECT u.state, COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS revenue
+    `SELECT u.state, COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS revenue
      FROM orders o
      JOIN users u ON u.id = o.customer_id
-     WHERE o.status = ANY($1) ${dateFilter}
+     WHERE o.status != 'cancelled' ${dateFilter}
      GROUP BY u.state
      ORDER BY revenue DESC`,
     params
@@ -52,7 +66,7 @@ async function salesReport({ startDate, endDate } = {}) {
      FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      JOIN products p ON p.id = oi.product_id
-     WHERE o.status = ANY($1) ${dateFilter}
+     WHERE o.status != 'cancelled' ${dateFilter}
      GROUP BY p.id, p.name, p.sku
      ORDER BY revenue DESC`,
     params
@@ -60,10 +74,10 @@ async function salesReport({ startDate, endDate } = {}) {
 
   const byDistributor = await db.query(
     `SELECT d.id AS distributor_id, d.business_name,
-            COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS revenue
+            COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS revenue
      FROM orders o
      JOIN distributors d ON d.id = o.distributor_id
-     WHERE o.status = ANY($1) ${dateFilter}
+     WHERE o.status != 'cancelled' ${dateFilter}
      GROUP BY d.id, d.business_name
      ORDER BY revenue DESC`,
     params
@@ -71,14 +85,14 @@ async function salesReport({ startDate, endDate } = {}) {
 
   // Sales reps' own personal orders (never assigned to a distributor for
   // delivery, since they ARE the buyer) — broken out separately so revenue
-  // from this new order type is visible, not just folded into the total.
+  // from this order type is visible, not just folded into the total.
   const salesRepSelfOrders = await db.query(
-    `SELECT COUNT(*) AS order_count, COALESCE(SUM(o.total_amount), 0) AS revenue
+    `SELECT COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS revenue
      FROM orders o
      JOIN users u ON u.id = o.customer_id
      JOIN distributors d ON d.user_id = u.id
      WHERE u.role = 'distributor' AND d.distributor_type = 'sales_rep'
-       AND o.status = ANY($1) ${dateFilter}`,
+       AND o.status != 'cancelled' ${dateFilter}`,
     params
   );
 
@@ -89,7 +103,7 @@ async function salesReport({ startDate, endDate } = {}) {
      FROM orders o
      WHERE o.payment_due_at IS NOT NULL
        AND o.status != 'cancelled'
-       AND COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) < o.total_amount`
+       AND ${paidSubquery} < o.total_amount`
   );
 
   return {
@@ -207,9 +221,8 @@ async function deliveryReport({ startDate, endDate } = {}) {
 // separately under salesRepSelfOrders in salesReport().
 async function repRevenueBreakdown({ startDate, endDate } = {}) {
   validateDateRange(startDate, endDate);
-  const paidStatuses = ["paid", "processing", "out_for_delivery", "delivered"];
 
-  const params = [paidStatuses];
+  const params = [];
   let dateFilter = "";
   if (startDate) {
     params.push(startDate);
@@ -231,7 +244,7 @@ async function repRevenueBreakdown({ startDate, endDate } = {}) {
        COUNT(*) FILTER (
          WHERE COALESCE(paid.total, 0) < o.total_amount
        ) AS pending_count,
-       COALESCE(SUM(o.total_amount), 0) AS revenue
+       COALESCE(SUM(COALESCE(paid.total, 0)), 0) AS revenue
      FROM distributors d
      JOIN users u ON u.id = d.user_id
      JOIN orders o ON (
@@ -241,7 +254,7 @@ async function repRevenueBreakdown({ startDate, endDate } = {}) {
      LEFT JOIN LATERAL (
        SELECT SUM(amount) AS total FROM order_payments WHERE order_id = o.id AND status = 'successful'
      ) paid ON true
-     WHERE o.status = ANY($1) ${dateFilter}
+     WHERE o.status != 'cancelled' ${dateFilter}
      GROUP BY d.id, d.distributor_type, d.business_name, u.id, u.full_name, u.state
      ORDER BY revenue DESC`,
     params
