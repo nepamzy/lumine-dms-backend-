@@ -157,7 +157,15 @@ async function confirmPaystackPayment(reference, { attempts = VERIFY_MAX_ATTEMPT
     return { order: await getOrderById(payment.order_id), paymentStatus: "pending" };
   }
 
-  const amountMatches = transaction.amount === Math.round(Number(payment.amount) * 100);
+  // Paystack's "Pay via bank transfer" flow (the channel almost all of
+  // these payments use) adds Paystack's own transaction fee on top of the
+  // amount we ask for, and passes it to the customer — so the amount
+  // actually charged is routinely a little MORE than what we requested
+  // (e.g. we ask for ₦500, the customer is charged ₦507.62). That's normal
+  // and still counts as this installment being paid in full. What we
+  // actually need to guard against is being charged LESS than we asked
+  // for, which would be a real problem, not a false alarm.
+  const amountMatches = transaction.amount >= Math.round(Number(payment.amount) * 100);
 
   if (transaction.status === "success" && amountMatches) {
     await db.query(`UPDATE order_payments SET status = 'successful' WHERE id = $1`, [payment.id]);
@@ -167,14 +175,14 @@ async function confirmPaystackPayment(reference, { attempts = VERIFY_MAX_ATTEMPT
   }
 
   if (transaction.status === "success" && !amountMatches) {
-    // Paystack says money moved, but not the amount we expected — this
-    // needs a human to look at it, not an automatic "failed". Leave it
-    // pending and flag it.
+    // Paystack says money moved, but LESS than we expected — a genuine
+    // underpayment, which needs a human to look at rather than an
+    // automatic "failed". Leave it pending and flag it.
     await db.query(`UPDATE order_payments SET status = 'pending' WHERE id = $1`, [payment.id]);
     return {
       order: await getOrderById(payment.order_id),
       paymentStatus: "pending",
-      flagged: "amount_mismatch",
+      flagged: "underpaid",
     };
   }
 
