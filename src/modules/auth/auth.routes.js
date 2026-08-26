@@ -11,7 +11,6 @@ const {
   changePasswordHandler,
   acknowledgePaymentNoticeHandler,
   updateLocationHandler,
-  locationStrikeHandler,
 } = require("./auth.controller");
 router.post("/register", registerHandler);
 router.post("/login", loginHandler);
@@ -20,7 +19,6 @@ router.post("/logout", logoutHandler);
 router.get("/me", authenticate, meHandler);
 router.patch("/me", authenticate, updateProfileHandler);
 router.patch("/me/location", authenticate, updateLocationHandler);
-router.post("/me/location-strike", authenticate, locationStrikeHandler);
 router.post("/change-password", authenticate, changePasswordHandler);
 router.post("/acknowledge-payment-notice", authenticate, authorize("customer"), acknowledgePaymentNoticeHandler);
 

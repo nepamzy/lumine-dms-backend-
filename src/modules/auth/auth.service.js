@@ -257,7 +257,7 @@ async function logout(refreshToken) {
 async function getCurrentUser(userId) {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, u.role, u.state, u.local_government, u.status, u.created_at,
-            u.location_captured_at, u.address, u.location_strikes,
+            u.location_captured_at, u.address,
             d.id AS distributor_id, d.referral_code, d.business_name AS distributor_business_name,
             d.distributor_type,
             d.approval_status,
@@ -273,10 +273,9 @@ async function getCurrentUser(userId) {
   if (result.rows.length === 0) throw new ApiError(404, "User not found");
   const user = result.rows[0];
 
-  // Customers, Sales Reps, AND Distributors must have granted location —
-  // nobody's exempt anymore. Existing accounts created before this
-  // requirement (or that slipped through without it) get re-prompted
-  // until they grant it.
+  // Customers, Sales Reps, and Distributors are prompted (dismissibly) to
+  // share their location if we don't have it on file — encouraged, not
+  // required. Declining or dismissing doesn't affect account status.
   user.needsLocationConsent = !user.location_captured_at && user.role !== "admin";
 
   // Sales Reps and Distributors are prompted (dismissibly) to fill in a
@@ -286,29 +285,9 @@ async function getCurrentUser(userId) {
   return user;
 }
 
-// Called by the frontend when it detects location permission is no longer
-// granted for a Sales Rep or Distributor who'd previously set it up.
-// Reaching 5 strikes auto-suspends the account.
-async function registerLocationStrike(userId) {
-  const result = await db.query(
-    `UPDATE users SET location_strikes = location_strikes + 1
-     WHERE id = $1 AND deleted_at IS NULL
-     RETURNING location_strikes`,
-    [userId]
-  );
-  if (result.rows.length === 0) throw new ApiError(404, "User not found");
-  const strikes = result.rows[0].location_strikes;
-
-  if (strikes >= 5) {
-    await db.query(`UPDATE users SET status = 'suspended' WHERE id = $1`, [userId]);
-  }
-
-  return { strikes, suspended: strikes >= 5 };
-}
-
 // Lets an authenticated user submit their current GPS position — used both
-// by the mandatory re-prompt for pre-existing accounts, and available for
-// anyone to refresh their location later.
+// by the dismissible re-prompt for accounts with no location on file, and
+// available for anyone to refresh their location later.
 async function updateLocation(userId, { latitude, longitude }) {
   if (latitude == null || longitude == null) {
     throw new ApiError(400, "latitude and longitude are required");
@@ -399,4 +378,4 @@ async function acknowledgePaymentNotice(userId) {
   return result.rows[0];
 }
 
-module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation, registerLocationStrike };
+module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation };
