@@ -53,17 +53,10 @@ async function register({ fullName, email, phone, password, role, state, latitud
     throw new ApiError(400, "Invalid role for self-registration");
   }
 
-  // Location is mandatory for Customers, Sales Reps, AND Distributors —
-  // nobody signs up without granting it (previously Distributors were
-  // exempt; that exemption has been removed).
-  // EXCEPTION: a sales rep registering a customer who has no Android
-  // phone can't grant browser geolocation on the customer's behalf, so
-  // that path skips this requirement entirely (location stays null).
-  const distributorTypeForCheck = role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : null;
-  const locationRequired = !registeredByDistributorId && (role === "customer" || role === "distributor");
-  if (locationRequired && (latitude == null || longitude == null)) {
-    throw new ApiError(400, "Location access is required to sign up. Please allow location access and try again.");
-  }
+  // Location is requested at signup for Customers, Sales Reps, and
+  // Distributors via the browser's own permission prompt, but it's
+  // optional — declining or dismissing it doesn't block account creation.
+  // Coordinates are simply stored as null if not provided.
 
   // Business name is mandatory for Customers, but stays optional for
   // Sales Reps (and true Distributors) — a sales rep may not run their
