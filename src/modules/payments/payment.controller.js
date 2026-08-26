@@ -39,10 +39,21 @@ const webhookHandler = asyncHandler(async (req, res) => {
 
 // Lets the frontend confirm status after redirect back from Paystack —
 // belt-and-suspenders alongside the webhook, since a user's browser
-// redirect can arrive before or after the webhook does.
+// redirect can arrive before or after the webhook does. Also reused as the
+// buyer/admin-facing "Recheck with Paystack" action on a pending or failed
+// payment row, since it's the exact same idempotent check.
 const verifyHandler = asyncHandler(async (req, res) => {
-  const order = await paymentService.confirmPaystackPayment(req.params.reference);
-  res.json({ success: true, data: order });
+  const { order, paymentStatus, flagged } = await paymentService.confirmPaystackPayment(req.params.reference);
+  res.json({ success: true, data: order, paymentStatus, flagged: flagged || null });
 });
 
-module.exports = { initializeHandler, webhookHandler, verifyHandler };
+// Admin-only manual trigger for the reconciliation sweep (it also runs
+// automatically on an interval — see server.js). Useful to run on demand
+// right after fixing a Paystack/webhook configuration issue, instead of
+// waiting for the next scheduled pass.
+const reconcileHandler = asyncHandler(async (req, res) => {
+  const checked = await paymentService.reconcilePendingPayments();
+  res.json({ success: true, data: { checked } });
+});
+
+module.exports = { initializeHandler, webhookHandler, verifyHandler, reconcileHandler };
