@@ -13,7 +13,11 @@ const PRODUCTION_DELAY_HOURS = 48;
 const DISTRIBUTOR_MIN_PAYMENT_PERCENT = 70; // per-payment floor for distributor orders
 const DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT = 85; // must reach this on current order before placing another
 const CUSTOMER_NEXT_ORDER_MIN_PERCENT = 100; // must be fully paid before placing another
-const HALF_PACK_UNITS = { "35cl": 12, "50cl": 12, "1L": 6 }; // must match frontend src/utils/packSizes.js
+// Minimum orderable increment. Was half-pack only; customers asked for a
+// smaller quarter-pack option too, so this now holds quarter-pack bottle
+// counts instead (half of the old half-pack values) — a half-pack order is
+// still perfectly valid, it's just 2 quarter-pack units instead of 1.
+const QUARTER_PACK_UNITS = { "35cl": 6, "50cl": 6, "1L": 3 }; // must match frontend src/utils/packSizes.js
 
 // A buyer's order-level "kind" for pricing/payment-rule purposes, derived
 // from the raw role + distributor_type columns joined onto an order row
@@ -155,18 +159,18 @@ async function buildOrderItemRows(client, buyer, items) {
       throw new ApiError(400, `No price configured for this product yet`);
     }
 
-    // Orders are placed in half-pack increments only — never single
-    // bottles. 50cl/35cl come 24 to a pack (half = 12); 1L comes 12 to a
-    // pack (half = 6).
-    const halfPackUnit = HALF_PACK_UNITS[variant.size] || 1;
-    if (item.quantity % halfPackUnit !== 0) {
+    // Orders are placed in quarter-pack increments — never single bottles.
+    // 50cl/35cl come 24 to a pack (quarter = 6); 1L comes 12 to a pack
+    // (quarter = 3). This is the smallest unit a customer can order.
+    const quarterPackUnit = QUARTER_PACK_UNITS[variant.size] || 1;
+    if (item.quantity % quarterPackUnit !== 0) {
       throw new ApiError(
         400,
-        `${variant.size} must be ordered in half-pack increments of ${halfPackUnit} bottles`
+        `${variant.size} must be ordered in quarter-pack increments of ${quarterPackUnit} bottles`
       );
     }
 
-    const packSize = halfPackUnit * 2;
+    const packSize = quarterPackUnit * 4;
     const packs = item.quantity / packSize;
     totalPacks += packs;
 
