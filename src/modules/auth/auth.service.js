@@ -74,7 +74,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
 
   const existing = await db.query(
     "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
-    [email]
+    [email || null]
   );
   if (existing.rows.length > 0) {
     throw new ApiError(409, "Cannot sign up with this email — an account with it already exists.");
@@ -92,7 +92,7 @@ async function register({ fullName, email, phone, password, role, state, latitud
        RETURNING id, full_name, email, phone, role, state, local_government, status, created_at`,
       [
         fullName,
-        email,
+        email || null,
         phone,
         passwordHash,
         role,

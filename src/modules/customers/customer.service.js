@@ -110,7 +110,7 @@ async function getCustomerHistory(customerUserId) {
      LEFT JOIN deliveries del ON del.order_id = o.id
      LEFT JOIN distributors dd ON dd.id = o.distributor_id
      LEFT JOIN users du ON du.id = dd.user_id
-     WHERE o.customer_id = $1
+     WHERE o.customer_id = $1 AND o.deleted_at IS NULL
      ORDER BY o.created_at DESC`,
     [customerUserId]
   );

@@ -19,10 +19,18 @@ async function notify({ userId, type, channel, message }) {
     const user = userResult.rows[0];
     if (!user) return record;
 
-    if (channel === "email") {
+    // A sales-rep-registered customer may have no email (optional on that
+    // signup path only) — fall back to SMS rather than attempt an email
+    // send to a null address, or silently skip something they could still
+    // actually receive.
+    const effectiveChannel = channel === "email" && !user.email && user.phone ? "sms" : channel;
+
+    if (effectiveChannel === "email" && user.email) {
       await sendEmail({ to: user.email, subject: type, message });
-    } else if (channel === "sms") {
+    } else if (effectiveChannel === "sms" && user.phone) {
       await sendSMS({ to: user.phone, message });
+    } else {
+      return record; // no usable channel for this user — skip cleanly
     }
 
     await db.query("UPDATE notifications SET sent_at = now() WHERE id = $1", [record.id]);

@@ -1,6 +1,6 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
-const { notifyDistributorApproved } = require("../notifications/notification.service");
+const { notifyDistributorApproved, notify } = require("../notifications/notification.service");
 
 // Lazily required to avoid a require-cycle at module-load time (auth.service
 // doesn't depend on distributor.service, so this is safe either way, but
@@ -283,6 +283,104 @@ async function listMyCustomers(userId) {
   return result.rows;
 }
 
+async function requireSalesRepDistributorId(userId) {
+  const distResult = await db.query("SELECT id, distributor_type FROM distributors WHERE user_id = $1", [userId]);
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
+  if (distResult.rows[0].distributor_type !== "sales_rep") {
+    throw new ApiError(403, "Only sales reps have a customer book");
+  }
+  return distResult.rows[0].id;
+}
+
+// Every customer this rep is either currently assigned, or has ever
+// fulfilled an order for — broader than listMyCustomers (which only shows
+// current assignments and excludes proxy-registered walk-ins), because
+// Track Record needs to keep showing a customer's history even after
+// they've been reassigned or removed, not just make them disappear.
+async function listTrackRecordCustomers(userId) {
+  const distributorId = await requireSalesRepDistributorId(userId);
+
+  const result = await db.query(
+    `SELECT DISTINCT u.id, u.full_name, u.email, u.phone, cp.business_name,
+            (cp.assigned_distributor_id = $1) AS currently_assigned
+     FROM users u
+     JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.deleted_at IS NULL AND u.role = 'customer'
+       AND (
+         cp.assigned_distributor_id = $1
+         OR EXISTS (
+           SELECT 1 FROM orders o WHERE o.customer_id = u.id AND o.distributor_id = $1 AND o.deleted_at IS NULL
+         )
+       )
+     ORDER BY u.full_name ASC`,
+    [distributorId]
+  );
+  return result.rows;
+}
+
+// One customer's order history as this rep should see it: full detail if
+// they're still assigned to this rep, but only their 100%-paid orders if
+// they've since been reassigned elsewhere or removed — the reassigned-away
+// customer keeps showing up in Track Record, just without their unpaid
+// history following them around a rep they're no longer with.
+async function getCustomerHistoryForRep(userId, customerId) {
+  const distributorId = await requireSalesRepDistributorId(userId);
+
+  const customerResult = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name,
+            (cp.assigned_distributor_id = $1) AS currently_assigned
+     FROM users u
+     JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.id = $2 AND u.deleted_at IS NULL AND u.role = 'customer'`,
+    [distributorId, customerId]
+  );
+  if (customerResult.rows.length === 0) throw new ApiError(404, "Customer not found");
+  const customer = customerResult.rows[0];
+
+  const ordersResult = await db.query(
+    `SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
+            COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid_amount
+     FROM orders o
+     WHERE o.customer_id = $1 AND o.distributor_id = $2 AND o.deleted_at IS NULL
+     ORDER BY o.created_at DESC`,
+    [customerId, distributorId]
+  );
+
+  let orders = ordersResult.rows.map((o) => ({
+    ...o,
+    payment_percent: Number(o.total_amount) > 0 ? (Number(o.paid_amount) / Number(o.total_amount)) * 100 : 0,
+  }));
+  if (!customer.currently_assigned) {
+    orders = orders.filter((o) => o.payment_percent >= 100);
+  }
+
+  return { customer, orders };
+}
+
+// Sends an SMS nudging a customer to complete payment on an order — the
+// sales rep's "Ping" action in Track Record. Reuses the existing generic
+// notify() (same Termii SMS path every other notification already goes
+// through), so it needs no new provider code.
+async function pingCustomer(userId, customerId, orderId) {
+  const distributorId = await requireSalesRepDistributorId(userId);
+
+  const orderResult = await db.query(
+    `SELECT order_number FROM orders WHERE id = $1 AND customer_id = $2 AND distributor_id = $3 AND deleted_at IS NULL`,
+    [orderId, customerId, distributorId]
+  );
+  if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found for this customer");
+
+  const customerResult = await db.query(`SELECT full_name FROM users WHERE id = $1`, [customerId]);
+  if (customerResult.rows.length === 0) throw new ApiError(404, "Customer not found");
+
+  await notify({
+    userId: customerId,
+    type: "payment_reminder",
+    channel: "sms",
+    message: `Hi ${customerResult.rows[0].full_name}, this is Lumine. You have an outstanding balance on order ${orderResult.rows[0].order_number}. Please complete payment soon to keep your account in good standing. Thank you!`,
+  });
+}
+
 // Everything currently in the trash — customers, sales reps, and
 // distributors together, admin-only. Nothing here is destroyed; this is
 // purely a visibility view.
@@ -300,6 +398,34 @@ async function listTrash() {
   return result.rows;
 }
 
+// Admin-only. Reverses a soft-delete for any role (customer, distributor,
+// sales rep) — the operation itself doesn't need to be role-specific.
+// Checks first whether a newer account has since taken the same email or
+// phone (the partial-unique index only applies to non-deleted rows, so
+// that's allowed to happen once this one's gone) — restoring would violate
+// that index, so this rejects clearly instead of letting the UPDATE throw
+// a raw DB error.
+async function restoreUser(userId) {
+  const userResult = await db.query(`SELECT id, email, phone, deleted_at FROM users WHERE id = $1`, [userId]);
+  if (userResult.rows.length === 0) throw new ApiError(404, "User not found");
+  const user = userResult.rows[0];
+  if (!user.deleted_at) throw new ApiError(400, "User is not deleted");
+
+  const conflict = await db.query(
+    `SELECT id FROM users WHERE (email = $1 OR phone = $2) AND deleted_at IS NULL AND id != $3`,
+    [user.email, user.phone, userId]
+  );
+  if (conflict.rows.length > 0) {
+    throw new ApiError(
+      409,
+      "Can't restore — a newer account already uses this email or phone. Remove or change that account first."
+    );
+  }
+
+  const result = await db.query(`UPDATE users SET deleted_at = NULL WHERE id = $1 RETURNING id`, [userId]);
+  return result.rows[0];
+}
+
 module.exports = {
   listDistributors,
   approveDistributor,
@@ -310,7 +436,11 @@ module.exports = {
   getReferralInfo,
   getDistributorHistory,
   listMyCustomers,
+  listTrackRecordCustomers,
+  getCustomerHistoryForRep,
+  pingCustomer,
   removeDistributor,
   listTrash,
+  restoreUser,
   registerCustomerForRep,
 };

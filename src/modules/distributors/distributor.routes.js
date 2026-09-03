@@ -38,6 +38,36 @@ router.post(
   })
 );
 
+router.get(
+  "/me/track-record",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const customers = await service.listTrackRecordCustomers(req.user.id);
+    res.json({ success: true, data: customers });
+  })
+);
+
+router.get(
+  "/me/track-record/:customerId",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const history = await service.getCustomerHistoryForRep(req.user.id, req.params.customerId);
+    res.json({ success: true, data: history });
+  })
+);
+
+router.post(
+  "/me/track-record/:customerId/ping",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    await service.pingCustomer(req.user.id, req.params.customerId, req.body.orderId);
+    res.json({ success: true, message: "Reminder sent" });
+  })
+);
+
 router.use(authenticate, authorize("admin"));
 
 router.get(
@@ -56,6 +86,14 @@ router.get(
   asyncHandler(async (req, res) => {
     const trashed = await service.listTrash();
     res.json({ success: true, data: trashed });
+  })
+);
+
+router.patch(
+  "/trash/:userId/restore",
+  asyncHandler(async (req, res) => {
+    const restored = await service.restoreUser(req.params.userId);
+    res.json({ success: true, message: "Restored", data: restored });
   })
 );
 
