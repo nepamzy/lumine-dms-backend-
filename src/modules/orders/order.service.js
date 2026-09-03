@@ -681,6 +681,96 @@ async function deleteOrder(orderId, actingUser) {
   }
 }
 
+// Admin-only. Reverses a soft-delete — does NOT attempt to automatically
+// re-reserve stock, even if it was released back to the pool when this
+// order was deleted (see deleteOrder above): that stock may have since
+// been sold to someone else, so silently re-decrementing it here risks
+// either failing unpredictably or double-booking. The caller is told
+// whether stock was released so the UI can surface a manual
+// "verify availability" notice instead of pretending nothing happened.
+async function restoreOrder(orderId, actingUser) {
+  if (actingUser.role !== "admin") throw new ApiError(403, "Only admin can restore an order");
+
+  const order = await getOrderById(orderId, { includeDeleted: true });
+  if (!order.deleted_at) throw new ApiError(400, "Order is not deleted");
+
+  const result = await db.query(
+    `UPDATE orders SET deleted_at = NULL, updated_at = now() WHERE id = $1 AND deleted_at IS NOT NULL RETURNING id`,
+    [orderId]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "Order not found or not deleted");
+
+  const stockWasReleased = !["delivered", "cancelled"].includes(order.status);
+  return { id: result.rows[0].id, stockWasReleased };
+}
+
+// Admin-only — every soft-deleted order with full detail (items, payment
+// percent). This is the Orders tab of Trash.
+async function listDeletedOrders() {
+  const result = await db.query(
+    `SELECT o.*, u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone,
+            COALESCE(
+              (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
+              0
+            ) AS paid_amount,
+            COALESCE(
+              (SELECT json_agg(json_build_object(
+                 'productName', pr.name, 'size', v.size, 'quantity', oi.quantity,
+                 'unitPrice', oi.unit_price, 'lineTotal', oi.line_total
+               ) ORDER BY pr.name)
+               FROM order_items oi
+               JOIN products pr ON pr.id = oi.product_id
+               LEFT JOIN product_variants v ON v.id = oi.variant_id
+               WHERE oi.order_id = o.id),
+              '[]'
+            ) AS items
+     FROM orders o
+     JOIN users u ON u.id = o.customer_id
+     WHERE o.deleted_at IS NOT NULL
+     ORDER BY o.deleted_at DESC`
+  );
+  return result.rows.map((row) => ({
+    ...row,
+    paymentPercent: Number(row.total_amount) > 0 ? (Number(row.paid_amount) / Number(row.total_amount)) * 100 : 0,
+  }));
+}
+
+// Admin-only. Reverses deleteOrder — clears deleted_at only. Deliberately
+// does NOT attempt to automatically re-reserve the stock that was released
+// back to inventory at delete time (see deleteOrder): that stock went into
+// the shared pool and may since have been sold to someone else, so silently
+// re-decrementing it here could fail unpredictably or double-book
+// inventory. stockWasReleased tells the caller whether that happened, so
+// the frontend can surface a "verify availability" notice — admin makes
+// the call, not the system.
+async function restoreOrder(orderId, actingUser) {
+  if (actingUser.role !== "admin") throw new ApiError(403, "Only admin can restore an order");
+
+  const order = await getOrderById(orderId, { includeDeleted: true });
+  if (!order.deleted_at) throw new ApiError(400, "Order is not deleted");
+
+  const result = await db.query(
+    `UPDATE orders SET deleted_at = NULL, updated_at = now() WHERE id = $1 RETURNING id`,
+    [orderId]
+  );
+
+  const stockWasReleased = !["delivered", "cancelled"].includes(order.status);
+  return { id: result.rows[0].id, stockWasReleased };
+}
+
+// Admin-only. Everything currently in the order trash, full detail per
+// row — this is what the Trash page's Orders tab shows.
+async function listDeletedOrders() {
+  const result = await db.query(
+    `SELECT id FROM orders WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`
+  );
+  const orders = [];
+  for (const row of result.rows) {
+    orders.push(await getOrderById(row.id, { includeDeleted: true }));
+  }
+  return orders;
+}
+
 async function assignDistributor(orderId, distributorId) {
   const distResult = await db.query(
     "SELECT id FROM distributors WHERE id = $1 AND approval_status = 'approved'",
@@ -938,6 +1028,8 @@ module.exports = {
   cancelOrder,
   editOrderItems,
   deleteOrder,
+  restoreOrder,
+  listDeletedOrders,
   assignDistributor,
   logPayment,
   confirmTransport,
