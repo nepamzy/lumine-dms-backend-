@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("./instrument");
 const app = require("./app");
 const { reconcilePendingPayments } = require("./modules/payments/payment.service");
 

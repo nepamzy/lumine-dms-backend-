@@ -1,3 +1,4 @@
+const Sentry = require("@sentry/node");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -22,9 +23,18 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use(helmet());
+
+// Always allows the configured production/deployed frontend (CLIENT_URL)
+// plus localhost:5173 (the frontend's Vite dev server) so local dev testing
+// works against this same backend/database without needing to flip CORS
+// back and forth.
+const allowedOrigins = [process.env.CLIENT_URL || "http://localhost:3000", "http://localhost:5173"];
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
   })
 );
@@ -64,6 +74,11 @@ app.use("/api/admin/map", mapRoutes);
 app.use("/api/contact", contactRoutes);
 
 app.use(notFound);
+
+// Reports uncaught errors to Sentry before our own error middleware formats
+// the response — must come after routes/notFound, before errorHandler.
+Sentry.setupExpressErrorHandler(app);
+
 app.use(errorHandler);
 
 module.exports = app;
