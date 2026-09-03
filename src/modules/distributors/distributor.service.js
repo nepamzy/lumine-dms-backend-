@@ -236,7 +236,7 @@ async function getDistributorHistory(distributorId) {
      LEFT JOIN deliveries del ON del.order_id = o.id
      LEFT JOIN users cu ON cu.id = o.customer_id
      LEFT JOIN customer_profiles cp ON cp.user_id = o.customer_id
-     WHERE o.distributor_id = $1
+     WHERE o.distributor_id = $1 AND o.deleted_at IS NULL
      ORDER BY o.created_at DESC`,
     [distributorId]
   );
@@ -276,6 +276,7 @@ async function listMyCustomers(userId) {
      FROM customer_profiles cp
      JOIN users u ON u.id = cp.user_id
      WHERE cp.assigned_distributor_id = $1 AND cp.registered_by_distributor_id IS NULL
+       AND u.deleted_at IS NULL
      ORDER BY u.full_name ASC`,
     [dist.id]
   );

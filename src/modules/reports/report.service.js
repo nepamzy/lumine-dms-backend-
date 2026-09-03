@@ -45,7 +45,7 @@ async function salesReport({ startDate, endDate } = {}) {
   const summary = await db.query(
     `SELECT COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS total_revenue
      FROM orders o
-     WHERE o.status != 'cancelled' ${dateFilter}`,
+     WHERE o.status != 'cancelled' AND o.deleted_at IS NULL ${dateFilter}`,
     params
   );
 
@@ -53,7 +53,7 @@ async function salesReport({ startDate, endDate } = {}) {
     `SELECT u.state, COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS revenue
      FROM orders o
      JOIN users u ON u.id = o.customer_id
-     WHERE o.status != 'cancelled' ${dateFilter}
+     WHERE o.status != 'cancelled' AND o.deleted_at IS NULL AND u.deleted_at IS NULL ${dateFilter}
      GROUP BY u.state
      ORDER BY revenue DESC`,
     params
@@ -66,7 +66,7 @@ async function salesReport({ startDate, endDate } = {}) {
      FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      JOIN products p ON p.id = oi.product_id
-     WHERE o.status != 'cancelled' ${dateFilter}
+     WHERE o.status != 'cancelled' AND o.deleted_at IS NULL AND p.deleted_at IS NULL ${dateFilter}
      GROUP BY p.id, p.name, p.sku
      ORDER BY revenue DESC`,
     params
@@ -77,7 +77,8 @@ async function salesReport({ startDate, endDate } = {}) {
             COUNT(*) AS order_count, COALESCE(SUM(${paidSubquery}), 0) AS revenue
      FROM orders o
      JOIN distributors d ON d.id = o.distributor_id
-     WHERE o.status != 'cancelled' ${dateFilter}
+     JOIN users du ON du.id = d.user_id
+     WHERE o.status != 'cancelled' AND o.deleted_at IS NULL AND du.deleted_at IS NULL ${dateFilter}
      GROUP BY d.id, d.business_name
      ORDER BY revenue DESC`,
     params
@@ -92,7 +93,7 @@ async function salesReport({ startDate, endDate } = {}) {
      JOIN users u ON u.id = o.customer_id
      JOIN distributors d ON d.user_id = u.id
      WHERE u.role = 'distributor' AND d.distributor_type = 'sales_rep'
-       AND o.status != 'cancelled' ${dateFilter}`,
+       AND o.status != 'cancelled' AND o.deleted_at IS NULL AND u.deleted_at IS NULL ${dateFilter}`,
     params
   );
 
@@ -101,8 +102,11 @@ async function salesReport({ startDate, endDate } = {}) {
   const pendingPaymentReminders = await db.query(
     `SELECT COUNT(*) AS count
      FROM orders o
+     JOIN users u ON u.id = o.customer_id
      WHERE o.payment_due_at IS NOT NULL
        AND o.status != 'cancelled'
+       AND o.deleted_at IS NULL
+       AND u.deleted_at IS NULL
        AND ${paidSubquery} < o.total_amount`
   );
 
@@ -125,7 +129,7 @@ async function inventoryReport({ expiringWithinDays = 30 } = {}) {
             MIN(b.expiry_date) FILTER (WHERE b.quantity_on_hand > 0) AS nearest_expiry
      FROM products p
      LEFT JOIN product_batches b ON b.product_id = p.id
-     WHERE p.is_active = true
+     WHERE p.is_active = true AND p.deleted_at IS NULL
      GROUP BY p.id
      ORDER BY p.name ASC`
   );
@@ -138,6 +142,7 @@ async function inventoryReport({ expiringWithinDays = 30 } = {}) {
      JOIN products p ON p.id = b.product_id
      WHERE b.expiry_date <= (CURRENT_DATE + $1::int)
        AND b.quantity_on_hand > 0
+       AND p.deleted_at IS NULL
      ORDER BY b.expiry_date ASC`,
     [expiringWithinDays]
   );
@@ -146,7 +151,7 @@ async function inventoryReport({ expiringWithinDays = 30 } = {}) {
     `SELECT p.id, p.name, p.sku, COALESCE(SUM(b.quantity_on_hand), 0) AS total_stock
      FROM products p
      LEFT JOIN product_batches b ON b.product_id = p.id
-     WHERE p.is_active = true
+     WHERE p.is_active = true AND p.deleted_at IS NULL
      GROUP BY p.id
      HAVING COALESCE(SUM(b.quantity_on_hand), 0) < 50
      ORDER BY total_stock ASC`
@@ -177,7 +182,8 @@ async function deliveryReport({ startDate, endDate } = {}) {
   const statusBreakdown = await db.query(
     `SELECT gps_status, COUNT(*) AS count
      FROM deliveries d
-     WHERE true ${dateFilter}
+     JOIN orders o ON o.id = d.order_id
+     WHERE o.deleted_at IS NULL ${dateFilter}
      GROUP BY gps_status`,
     params
   );
@@ -185,7 +191,8 @@ async function deliveryReport({ startDate, endDate } = {}) {
   const avgDeliveryTime = await db.query(
     `SELECT AVG(EXTRACT(EPOCH FROM (delivered_at - d.updated_at)) / 3600) AS avg_hours
      FROM deliveries d
-     WHERE gps_status = 'delivered' AND delivered_at IS NOT NULL ${dateFilter}`,
+     JOIN orders o ON o.id = d.order_id
+     WHERE gps_status = 'delivered' AND delivered_at IS NOT NULL AND o.deleted_at IS NULL ${dateFilter}`,
     params
   );
 
@@ -195,7 +202,9 @@ async function deliveryReport({ startDate, endDate } = {}) {
             COUNT(*) FILTER (WHERE d.gps_status = 'failed') AS failed_count
      FROM deliveries d
      JOIN distributors dist ON dist.id = d.distributor_id
-     WHERE true ${dateFilter}
+     JOIN users du ON du.id = dist.user_id
+     JOIN orders o ON o.id = d.order_id
+     WHERE o.deleted_at IS NULL AND du.deleted_at IS NULL ${dateFilter}
      GROUP BY dist.id, dist.business_name
      ORDER BY delivered_count DESC`,
     params
@@ -254,7 +263,7 @@ async function repRevenueBreakdown({ startDate, endDate } = {}) {
      LEFT JOIN LATERAL (
        SELECT SUM(amount) AS total FROM order_payments WHERE order_id = o.id AND status = 'successful'
      ) paid ON true
-     WHERE o.status != 'cancelled' ${dateFilter}
+     WHERE o.status != 'cancelled' AND o.deleted_at IS NULL AND u.deleted_at IS NULL ${dateFilter}
      GROUP BY d.id, d.distributor_type, d.business_name, u.id, u.full_name, u.state
      ORDER BY revenue DESC`,
     params

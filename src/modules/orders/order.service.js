@@ -399,7 +399,11 @@ function computeStage(order, buyerKind) {
   return { placed: true, production, transport, received };
 }
 
-async function getOrderById(id) {
+// includeDeleted lets the trash/restore flow (admin-only) still look up a
+// soft-deleted order by ID. Every other caller leaves this false, which is
+// what keeps a deleted order from being viewable/mutable through any of the
+// functions below that go through this lookup.
+async function getOrderById(id, { includeDeleted = false } = {}) {
   const orderResult = await db.query(
     `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type,
             u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone
@@ -411,6 +415,7 @@ async function getOrderById(id) {
   );
   if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
   const order = orderResult.rows[0];
+  if (order.deleted_at && !includeDeleted) throw new ApiError(404, "Order not found");
   const buyerKind = resolveBuyerKindFromRow(order);
 
   const itemsResult = await db.query(
@@ -575,6 +580,7 @@ async function editOrderItems(orderId, items, actingUser) {
     );
     if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
     const order = orderResult.rows[0];
+    if (order.deleted_at) throw new ApiError(404, "Order not found");
 
     const isAdmin = actingUser.role === "admin";
     const isBuyer = order.customer_id === actingUser.id;
@@ -938,4 +944,5 @@ module.exports = {
   confirmReceived,
   listExpiringOrders,
   validatePaymentAmount,
+  VALID_TRANSITIONS,
 };
