@@ -2,13 +2,18 @@ const asyncHandler = require("../../utils/asyncHandler");
 const ApiError = require("../../utils/ApiError");
 const authService = require("./auth.service");
 
-const isProd = process.env.NODE_ENV === "production";
+// Deliberately its own flag, NOT tied to NODE_ENV — the local backend runs
+// with NODE_ENV=production (required for the DB's SSL connection) even
+// during local dev over plain http://localhost, where a `secure` cookie
+// would be silently rejected by the browser. COOKIE_SECURE is set true only
+// on the actual deployed (HTTPS) server.
+const cookieSecure = process.env.COOKIE_SECURE === "true";
 
 function setRefreshCookie(res, token) {
   res.cookie("refreshToken", token, {
     httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? "none" : "lax",
+    secure: cookieSecure,
+    sameSite: cookieSecure ? "none" : "lax",
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 }
