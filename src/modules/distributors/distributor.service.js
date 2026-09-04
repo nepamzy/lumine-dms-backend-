@@ -357,6 +357,40 @@ async function getCustomerHistoryForRep(userId, customerId) {
   return { customer, orders };
 }
 
+// Admin-only. A sales rep's Target Overview for one calendar month: every
+// order that's been through the monthly sweep (moved_to_target_overview_at
+// set), credited to whichever month it actually reached 100% paid
+// (paid_in_full_at) -- not the month it was placed. Attribution is by
+// orders.distributor_id, frozen at order-creation time, same rule as
+// getCustomerHistoryForRep above -- a rep keeps credit for a sale even if
+// the customer is later reassigned to someone else.
+async function getTargetOverviewForRep(distributorId, year, month) {
+  const monthStart = new Date(Date.UTC(year, month - 1, 1));
+  const monthEnd = new Date(Date.UTC(year, month, 1));
+
+  const result = await db.query(
+    `SELECT o.id, o.order_number, o.total_amount, o.paid_in_full_at, o.created_at,
+            u.full_name AS customer_name, cp.business_name AS customer_business_name
+     FROM orders o
+     JOIN users u ON u.id = o.customer_id
+     LEFT JOIN customer_profiles cp ON cp.user_id = o.customer_id
+     WHERE o.distributor_id = $1
+       AND o.moved_to_target_overview_at IS NOT NULL
+       AND o.paid_in_full_at >= $2 AND o.paid_in_full_at < $3
+       AND o.deleted_at IS NULL
+     ORDER BY o.paid_in_full_at DESC`,
+    [distributorId, monthStart, monthEnd]
+  );
+
+  const orders = result.rows;
+  const totalRevenue = orders.reduce((sum, o) => sum + Number(o.total_amount), 0);
+
+  return {
+    orders,
+    summary: { totalOrders: orders.length, totalRevenue },
+  };
+}
+
 // Sends an SMS nudging a customer to complete payment on an order — the
 // sales rep's "Ping" action in Track Record. Reuses the existing generic
 // notify() (same Termii SMS path every other notification already goes
@@ -438,6 +472,7 @@ module.exports = {
   listMyCustomers,
   listTrackRecordCustomers,
   getCustomerHistoryForRep,
+  getTargetOverviewForRep,
   pingCustomer,
   removeDistributor,
   listTrash,

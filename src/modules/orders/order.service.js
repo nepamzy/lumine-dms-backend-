@@ -441,10 +441,16 @@ async function listOrders(user, { status } = {}) {
   const conditions = ["o.deleted_at IS NULL"];
   const values = [];
   let i = 1;
+  // True for anyone viewing THEIR OWN purchases (customer, or a true
+  // distributor buying for themselves) — those keep seeing an order even
+  // after the monthly Target Overview sweep moves it out of the
+  // admin/sales-rep working Orders list.
+  let isOwnPurchaseView = false;
 
   if (user.role === "customer") {
     conditions.push(`o.customer_id = $${i++}`);
     values.push(user.id);
+    isOwnPurchaseView = true;
   } else if (user.role === "distributor") {
     const distResult = await db.query(
       "SELECT id, distributor_type FROM distributors WHERE user_id = $1",
@@ -456,13 +462,18 @@ async function listOrders(user, { status } = {}) {
       // A true distributor sees their OWN purchases, same as a customer would.
       conditions.push(`o.customer_id = $${i++}`);
       values.push(user.id);
+      isOwnPurchaseView = true;
     } else {
       // A sales rep sees orders they're assigned to deliver.
       conditions.push(`o.distributor_id = $${i++}`);
       values.push(dist.id);
     }
   }
-  // admin: no filter, sees everything
+  // admin: no filter, sees everything (except the Target Overview sweep below)
+
+  if (!isOwnPurchaseView) {
+    conditions.push("o.moved_to_target_overview_at IS NULL");
+  }
 
   if (status) {
     conditions.push(`o.status = $${i++}`);
@@ -472,7 +483,7 @@ async function listOrders(user, { status } = {}) {
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await db.query(
     `SELECT o.*, u.full_name AS customer_name, u.state AS customer_state, u.role AS buyer_role,
-            COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id), 0) AS paid_amount
+            COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid_amount
      FROM orders o
      JOIN users u ON u.id = o.customer_id
      ${where}
@@ -704,60 +715,6 @@ async function restoreOrder(orderId, actingUser) {
   return { id: result.rows[0].id, stockWasReleased };
 }
 
-// Admin-only — every soft-deleted order with full detail (items, payment
-// percent). This is the Orders tab of Trash.
-async function listDeletedOrders() {
-  const result = await db.query(
-    `SELECT o.*, u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone,
-            COALESCE(
-              (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
-              0
-            ) AS paid_amount,
-            COALESCE(
-              (SELECT json_agg(json_build_object(
-                 'productName', pr.name, 'size', v.size, 'quantity', oi.quantity,
-                 'unitPrice', oi.unit_price, 'lineTotal', oi.line_total
-               ) ORDER BY pr.name)
-               FROM order_items oi
-               JOIN products pr ON pr.id = oi.product_id
-               LEFT JOIN product_variants v ON v.id = oi.variant_id
-               WHERE oi.order_id = o.id),
-              '[]'
-            ) AS items
-     FROM orders o
-     JOIN users u ON u.id = o.customer_id
-     WHERE o.deleted_at IS NOT NULL
-     ORDER BY o.deleted_at DESC`
-  );
-  return result.rows.map((row) => ({
-    ...row,
-    paymentPercent: Number(row.total_amount) > 0 ? (Number(row.paid_amount) / Number(row.total_amount)) * 100 : 0,
-  }));
-}
-
-// Admin-only. Reverses deleteOrder — clears deleted_at only. Deliberately
-// does NOT attempt to automatically re-reserve the stock that was released
-// back to inventory at delete time (see deleteOrder): that stock went into
-// the shared pool and may since have been sold to someone else, so silently
-// re-decrementing it here could fail unpredictably or double-book
-// inventory. stockWasReleased tells the caller whether that happened, so
-// the frontend can surface a "verify availability" notice — admin makes
-// the call, not the system.
-async function restoreOrder(orderId, actingUser) {
-  if (actingUser.role !== "admin") throw new ApiError(403, "Only admin can restore an order");
-
-  const order = await getOrderById(orderId, { includeDeleted: true });
-  if (!order.deleted_at) throw new ApiError(400, "Order is not deleted");
-
-  const result = await db.query(
-    `UPDATE orders SET deleted_at = NULL, updated_at = now() WHERE id = $1 RETURNING id`,
-    [orderId]
-  );
-
-  const stockWasReleased = !["delivered", "cancelled"].includes(order.status);
-  return { id: result.rows[0].id, stockWasReleased };
-}
-
 // Admin-only. Everything currently in the order trash, full detail per
 // row — this is what the Trash page's Orders tab shows.
 async function listDeletedOrders() {
@@ -841,8 +798,23 @@ async function logPayment(orderId, amount, actingUser, note, { percentOfTotal } 
   );
 
   const updatedOrder = await getOrderById(orderId);
+  if (order.payment.percent < 100 && updatedOrder.payment.percent >= 100) {
+    await markPaidInFull(orderId);
+  }
   notifyPaymentSuccess(updatedOrder, updatedOrder.customer_id).catch(() => {});
   return updatedOrder;
+}
+
+// Records the moment an order's payments first reach 100% — this is what
+// determines which month it gets credited to in Target Overview, NOT the
+// month it was originally placed. The IS NULL guard makes this safe to call
+// more than once (e.g. if a later correction briefly dipped and re-crossed
+// 100% — only the first crossing counts).
+async function markPaidInFull(orderId) {
+  await db.query(
+    `UPDATE orders SET paid_in_full_at = now() WHERE id = $1 AND paid_in_full_at IS NULL`,
+    [orderId]
+  );
 }
 
 // Admin-only: moves an order to "on transport." Also stamps expiry_date =
@@ -1020,6 +992,23 @@ async function listExpiringOrders(user) {
   return result.rows.map((row) => ({ ...row, ...getExpiryInfo(row.expiry_date) }));
 }
 
+// Meant to be called once a month by an external scheduler (Render Cron
+// Job), same pattern as runDailyBatchCreation in product.service.js.
+// Moves every order that has reached 100% paid out of the working
+// admin/sales-rep Orders tab and into Target Overview, by stamping
+// moved_to_target_overview_at. Naturally idempotent -- nothing left to
+// update on a re-run, no separate guard table needed like the daily batch
+// job has (there's no "only once per day" race here, just "sweep whatever
+// is currently eligible").
+async function runMonthlyTargetSweep() {
+  const result = await db.query(
+    `UPDATE orders SET moved_to_target_overview_at = now()
+     WHERE paid_in_full_at IS NOT NULL AND moved_to_target_overview_at IS NULL AND deleted_at IS NULL
+     RETURNING id`
+  );
+  return { moved: result.rows.length };
+}
+
 module.exports = {
   createOrder,
   getOrderById,
@@ -1032,6 +1021,8 @@ module.exports = {
   listDeletedOrders,
   assignDistributor,
   logPayment,
+  markPaidInFull,
+  runMonthlyTargetSweep,
   confirmTransport,
   confirmReceived,
   listExpiringOrders,

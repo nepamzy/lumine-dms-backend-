@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { authenticate, authorize } = require("../../middleware/auth.middleware");
 const asyncHandler = require("../../utils/asyncHandler");
+const ApiError = require("../../utils/ApiError");
 const service = require("./distributor.service");
 
 // Distributor-facing: view their own referral code/link + referred customers.
@@ -134,6 +135,17 @@ router.get(
   asyncHandler(async (req, res) => {
     const history = await service.getDistributorHistory(req.params.id);
     res.json({ success: true, data: history });
+  })
+);
+
+router.get(
+  "/:id/target-overview",
+  asyncHandler(async (req, res) => {
+    const year = Number(req.query.year);
+    const month = Number(req.query.month);
+    if (!year || !month) throw new ApiError(400, "year and month are required");
+    const data = await service.getTargetOverviewForRep(req.params.id, year, month);
+    res.json({ success: true, data });
   })
 );
 

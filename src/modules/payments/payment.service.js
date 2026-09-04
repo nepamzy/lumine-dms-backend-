@@ -2,7 +2,7 @@ const axios = require("axios");
 const crypto = require("crypto");
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
-const { getOrderById, validatePaymentAmount } = require("../orders/order.service");
+const { getOrderById, validatePaymentAmount, markPaidInFull } = require("../orders/order.service");
 const { notifyPaymentSuccess } = require("../notifications/notification.service");
 
 const PAYSTACK_BASE_URL = "https://api.paystack.co";
@@ -168,8 +168,12 @@ async function confirmPaystackPayment(reference, { attempts = VERIFY_MAX_ATTEMPT
   const amountMatches = transaction.amount >= Math.round(Number(payment.amount) * 100);
 
   if (transaction.status === "success" && amountMatches) {
+    const beforeOrder = await getOrderById(payment.order_id);
     await db.query(`UPDATE order_payments SET status = 'successful' WHERE id = $1`, [payment.id]);
     const order = await getOrderById(payment.order_id);
+    if (beforeOrder.payment.percent < 100 && order.payment.percent >= 100) {
+      await markPaidInFull(payment.order_id);
+    }
     notifyPaymentSuccess(order, order.customer_id).catch(() => {});
     return { order, paymentStatus: "successful" };
   }

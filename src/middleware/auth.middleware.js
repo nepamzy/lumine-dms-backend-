@@ -45,4 +45,14 @@ function optionalAuthenticate(req, res, next) {
   next();
 }
 
-module.exports = { authenticate, authorize, optionalAuthenticate };
+// Allows either a logged-in admin OR a matching X-Cron-Secret header — the
+// second path is for an external scheduler (Render Cron Job, cron-job.org,
+// etc.) that can't hold a real admin session. Set CRON_SECRET in the
+// backend's env vars and configure the scheduler to send the same value.
+function authenticateAdminOrCron(req, res, next) {
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && req.headers["x-cron-secret"] === cronSecret) return next();
+  return authenticate(req, res, () => authorize("admin")(req, res, next));
+}
+
+module.exports = { authenticate, authorize, optionalAuthenticate, authenticateAdminOrCron };

@@ -92,6 +92,11 @@ const listExpiringHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: orders });
 });
 
+const runMonthlyTargetSweepHandler = asyncHandler(async (req, res) => {
+  const result = await orderService.runMonthlyTargetSweep();
+  res.json({ success: true, data: result });
+});
+
 module.exports = {
   createHandler,
   listHandler,
@@ -107,4 +112,5 @@ module.exports = {
   confirmTransportHandler,
   confirmReceivedHandler,
   listExpiringHandler,
+  runMonthlyTargetSweepHandler,
 };

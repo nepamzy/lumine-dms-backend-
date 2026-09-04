@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { authenticate, authorize } = require("../../middleware/auth.middleware");
+const { authenticate, authorize, authenticateAdminOrCron } = require("../../middleware/auth.middleware");
 const {
   createHandler,
   listHandler,
@@ -16,7 +16,12 @@ const {
   confirmTransportHandler,
   confirmReceivedHandler,
   listExpiringHandler,
+  runMonthlyTargetSweepHandler,
 } = require("./order.controller");
+
+// Registered before the blanket authenticate below, so an external
+// scheduler's X-Cron-Secret header can reach this without a real session.
+router.post("/run-monthly-sweep", authenticateAdminOrCron, runMonthlyTargetSweepHandler);
 
 router.use(authenticate); // every order route requires login
 
