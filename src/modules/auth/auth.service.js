@@ -1,12 +1,16 @@
 const bcrypt = require("bcrypt");
+const crypto = require("crypto");
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const {
   signAccessToken,
   signRefreshToken,
   verifyRefreshToken,
+  signPasswordResetToken,
+  verifyPasswordResetToken,
 } = require("../../utils/jwt");
 const { generateUniqueReferralCode } = require("../../utils/referralCode");
+const notificationService = require("../notifications/notification.service");
 
 // Finds the best distributor to auto-assign a new customer to, when they
 // didn't sign up through a specific referral link. Prefers a distributor in
@@ -46,6 +50,18 @@ async function findClosestDistributor(client, { state, localGovernment }) {
 }
 
 const SALT_ROUNDS = 12;
+
+// login() and resetPassword() both SELECT u.* to get the full row, which
+// picks up internal-only columns (password_hash, and the OTP/reset-session
+// bookkeeping below) that must never reach the client.
+function sanitizeUser(user) {
+  delete user.password_hash;
+  delete user.reset_otp_hash;
+  delete user.reset_otp_expires_at;
+  delete user.reset_otp_attempts;
+  delete user.reset_session_id;
+  return user;
+}
 
 async function register({ fullName, email, phone, password, role, state, latitude, longitude, localGovernment, extra = {}, registeredByDistributorId } = {}) {
   if (!["customer", "distributor"].includes(role)) {
@@ -215,7 +231,7 @@ async function login({ email, password }) {
     [user.id, refreshToken, expiresAt]
   );
 
-  delete user.password_hash;
+  sanitizeUser(user);
   return { user, accessToken, refreshToken };
 }
 
@@ -362,6 +378,138 @@ async function changePassword(userId, currentPassword, newPassword) {
   const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
   await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [newHash, userId]);
 }
+const OTP_LENGTH = 6;
+const OTP_TTL_MINUTES = 10;
+const MAX_OTP_ATTEMPTS = 5;
+
+function generateOtp() {
+  return crypto.randomInt(0, 10 ** OTP_LENGTH).toString().padStart(OTP_LENGTH, "0");
+}
+
+// Deliberately silent about whether the email has an account — the
+// response is identical either way, so this never doubles as an
+// email-enumeration probe.
+async function forgotPassword(email) {
+  if (!email) throw new ApiError(400, "Email is required");
+
+  const result = await db.query(
+    "SELECT id, email, phone FROM users WHERE email = $1 AND deleted_at IS NULL",
+    [email]
+  );
+  const user = result.rows[0];
+  if (!user) return;
+
+  const code = generateOtp();
+  const codeHash = await bcrypt.hash(code, SALT_ROUNDS);
+  const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
+
+  await db.query(
+    `UPDATE users SET reset_otp_hash = $1, reset_otp_expires_at = $2, reset_otp_attempts = 0 WHERE id = $3`,
+    [codeHash, expiresAt, user.id]
+  );
+
+  const message = `Your Lumine password reset code is ${code}. It expires in ${OTP_TTL_MINUTES} minutes. If you didn't request this, you can ignore this message.`;
+
+  // Sent to every contact method on file — email and SMS both, if the
+  // account has both — always the same code either way.
+  if (user.email) {
+    await notificationService.notify({ userId: user.id, type: "password_reset", channel: "email", message });
+  }
+  if (user.phone) {
+    await notificationService.notify({ userId: user.id, type: "password_reset", channel: "sms", message });
+  }
+}
+
+// Returns a short-lived reset token on success — proof of identity for the
+// next step, but not a login session. The code itself is single-use: a
+// correct guess clears the stored hash immediately so it can't be replayed.
+async function verifyResetOtp(email, code) {
+  if (!email || !code) throw new ApiError(400, "Email and code are required");
+
+  const result = await db.query(
+    "SELECT id, reset_otp_hash, reset_otp_expires_at, reset_otp_attempts FROM users WHERE email = $1 AND deleted_at IS NULL",
+    [email]
+  );
+  const user = result.rows[0];
+  if (!user || !user.reset_otp_hash) {
+    throw new ApiError(400, "Invalid or expired code");
+  }
+
+  if (user.reset_otp_attempts >= MAX_OTP_ATTEMPTS) {
+    throw new ApiError(429, "Too many incorrect attempts. Request a new code.");
+  }
+
+  if (!user.reset_otp_expires_at || new Date(user.reset_otp_expires_at) < new Date()) {
+    throw new ApiError(400, "This code has expired. Request a new one.");
+  }
+
+  const matches = await bcrypt.compare(code, user.reset_otp_hash);
+  if (!matches) {
+    await db.query("UPDATE users SET reset_otp_attempts = reset_otp_attempts + 1 WHERE id = $1", [user.id]);
+    throw new ApiError(400, "Incorrect code");
+  }
+
+  const sessionId = crypto.randomUUID();
+  await db.query(
+    `UPDATE users
+     SET reset_otp_hash = NULL, reset_otp_expires_at = NULL, reset_otp_attempts = 0, reset_session_id = $2
+     WHERE id = $1`,
+    [user.id, sessionId]
+  );
+
+  return signPasswordResetToken({ id: user.id, sid: sessionId });
+}
+
+// Sets the new password and signs the user straight in — OTP verification
+// already proved who they are, so this is the one place a password change
+// deliberately skips asking for the current password. Existing sessions
+// are invalidated first, same reasoning as a normal password change should
+// arguably get too: a reset means any session issued before it shouldn't
+// be trusted to continue on the old credential.
+async function resetPassword(resetToken, newPassword) {
+  if (!newPassword || newPassword.length < 8) {
+    throw new ApiError(400, "New password must be at least 8 characters");
+  }
+
+  let decoded;
+  try {
+    decoded = verifyPasswordResetToken(resetToken);
+  } catch {
+    throw new ApiError(401, "This reset session has expired. Start the forgot-password process again.");
+  }
+
+  const result = await db.query("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL", [decoded.id]);
+  const user = result.rows[0];
+  if (!user) throw new ApiError(404, "User not found");
+
+  // The JWT signature only proves we issued this token, not that it hasn't
+  // already been redeemed — reset_session_id is the actual single-use check,
+  // cleared in the same statement that applies the new password so a
+  // replayed token can never land twice.
+  if (!decoded.sid || decoded.sid !== user.reset_session_id) {
+    throw new ApiError(401, "This reset link has already been used. Start the forgot-password process again.");
+  }
+
+  const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await db.query(
+    "UPDATE users SET password_hash = $1, reset_session_id = NULL WHERE id = $2",
+    [newHash, user.id]
+  );
+  await db.query("DELETE FROM sessions WHERE user_id = $1", [user.id]);
+
+  const tokenPayload = { id: user.id, role: user.role };
+  const accessToken = signAccessToken(tokenPayload);
+  const refreshToken = signRefreshToken(tokenPayload);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await db.query(
+    "INSERT INTO sessions (user_id, refresh_token, expires_at) VALUES ($1, $2, $3)",
+    [user.id, refreshToken, expiresAt]
+  );
+
+  sanitizeUser(user);
+  return { user, accessToken, refreshToken };
+}
+
 async function acknowledgePaymentNotice(userId) {
   const result = await db.query(
     `UPDATE customer_profiles SET acknowledged_payment_notice = true WHERE user_id = $1 RETURNING *`,
@@ -371,4 +519,17 @@ async function acknowledgePaymentNotice(userId) {
   return result.rows[0];
 }
 
-module.exports = { register, login, refresh, logout, getCurrentUser, updateProfile, changePassword, acknowledgePaymentNotice, updateLocation };
+module.exports = {
+  register,
+  login,
+  refresh,
+  logout,
+  getCurrentUser,
+  updateProfile,
+  changePassword,
+  acknowledgePaymentNotice,
+  updateLocation,
+  forgotPassword,
+  verifyResetOtp,
+  resetPassword,
+};
