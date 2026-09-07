@@ -10,7 +10,10 @@ function generateOrderNumber() {
 }
 
 const PRODUCTION_DELAY_HOURS = 48;
-const DISTRIBUTOR_MIN_PAYMENT_PERCENT = 70; // per-payment floor for distributor orders
+// First-installment floors — only the FIRST successful payment on an order
+// needs to clear this; once it has, later top-ups can be any amount.
+const CUSTOMER_FIRST_PAYMENT_MIN_PERCENT = 60;
+const DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT = 85;
 // Every buyer type — customer, distributor, or sales rep buying for
 // themselves — must reach 100% paid on every existing order before placing
 // another. Distributors previously got an 85% carve-out here, which is
@@ -373,12 +376,19 @@ function validatePaymentAmount(order, amount) {
     );
   }
 
-  if (order.buyerKind === "distributor") {
-    const minPayment = (DISTRIBUTOR_MIN_PAYMENT_PERCENT / 100) * Number(order.total_amount);
-    if (Number(amount) < minPayment && !wouldCompleteOrder) {
+  // Customers and distributors can both pay in installments, but the FIRST
+  // successful payment on the order must clear a minimum floor (60% for a
+  // customer, 85% for a distributor) — once that's in, later top-ups can be
+  // any amount at all, no floor applies to them.
+  const isFirstPayment = order.payment.totalPaid === 0;
+  if (isFirstPayment && !wouldCompleteOrder && order.buyerKind !== "salesRepSelf") {
+    const minPercent =
+      order.buyerKind === "distributor" ? DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT : CUSTOMER_FIRST_PAYMENT_MIN_PERCENT;
+    const minPayment = (minPercent / 100) * Number(order.total_amount);
+    if (Number(amount) < minPayment) {
       throw new ApiError(
         400,
-        `Distributor payments must be at least ${DISTRIBUTOR_MIN_PAYMENT_PERCENT}% of the order total (₦${minPayment.toLocaleString()}) unless it completes the order.`
+        `Your first payment on this order must be at least ${minPercent}% of the total (₦${minPayment.toLocaleString()}) unless it completes the order.`
       );
     }
   }
