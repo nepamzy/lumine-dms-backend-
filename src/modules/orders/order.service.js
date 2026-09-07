@@ -10,9 +10,15 @@ function generateOrderNumber() {
 }
 
 const PRODUCTION_DELAY_HOURS = 48;
-const DISTRIBUTOR_MIN_PAYMENT_PERCENT = 70; // per-payment floor for distributor orders
-const DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT = 85; // must reach this on current order before placing another
-const CUSTOMER_NEXT_ORDER_MIN_PERCENT = 100; // must be fully paid before placing another
+// First-installment floors — only the FIRST successful payment on an order
+// needs to clear this; once it has, later top-ups can be any amount.
+const CUSTOMER_FIRST_PAYMENT_MIN_PERCENT = 60;
+const DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT = 85;
+// Every buyer type — customer, distributor, or sales rep buying for
+// themselves — must reach 100% paid on every existing order before placing
+// another. Distributors previously got an 85% carve-out here, which is
+// exactly what let a new order go out while real money was still owed.
+const NEXT_ORDER_MIN_PERCENT = 100;
 // Minimum orderable increment. Was half-pack only; customers asked for a
 // smaller quarter-pack option too, so this now holds quarter-pack bottle
 // counts instead (half of the old half-pack values) — a half-pack order is
@@ -61,7 +67,7 @@ async function findDistributorForState(client, state) {
 // Returns { id, state, kind: 'customer'|'distributor'|'salesRepSelf' }.
 async function resolveBuyer(client, buyerId) {
   const result = await client.query(
-    `SELECT u.id, u.state, u.role, d.distributor_type, cp.registered_by_distributor_id
+    `SELECT u.id, u.state, u.role, d.id AS distributor_row_id, d.distributor_type, cp.registered_by_distributor_id
      FROM users u
      LEFT JOIN distributors d ON d.user_id = u.id
      LEFT JOIN customer_profiles cp ON cp.user_id = u.id
@@ -83,24 +89,21 @@ async function resolveBuyer(client, buyerId) {
 
   if (row.role === "customer") return { id: row.id, state: row.state, kind: "customer" };
   if (row.role === "distributor" && row.distributor_type === "distributor") {
-    return { id: row.id, state: row.state, kind: "distributor" };
+    return { id: row.id, state: row.state, kind: "distributor", distributorRowId: row.distributor_row_id };
   }
   if (row.role === "distributor" && row.distributor_type === "sales_rep") {
-    return { id: row.id, state: row.state, kind: "salesRepSelf" };
+    return { id: row.id, state: row.state, kind: "salesRepSelf", distributorRowId: row.distributor_row_id };
   }
   throw new ApiError(403, "Only customers and distributors can place their own orders");
 }
 
-// Blocks placing a new order until the buyer's existing orders clear the
-// required payment threshold — 100% for customers and sales reps buying
-// for themselves, 85% for true distributors.
-async function assertCanPlaceOrder(client, buyerId, kind) {
-  const threshold =
-    kind === "distributor" ? DISTRIBUTOR_NEXT_ORDER_MIN_PERCENT : CUSTOMER_NEXT_ORDER_MIN_PERCENT;
-
+// Blocks placing a new order until every one of the buyer's existing
+// orders is fully (100%) paid — applies the same way to customers, true
+// distributors, and sales reps buying for themselves.
+async function assertCanPlaceOrder(client, buyerId) {
   const result = await client.query(
     `SELECT o.id, o.order_number, o.total_amount,
-            COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id), 0) AS paid
+            COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid
      FROM orders o
      WHERE o.customer_id = $1 AND o.status != 'cancelled'`,
     [buyerId]
@@ -108,11 +111,11 @@ async function assertCanPlaceOrder(client, buyerId, kind) {
 
   for (const row of result.rows) {
     const percent = Number(row.total_amount) > 0 ? (Number(row.paid) / Number(row.total_amount)) * 100 : 100;
-    if (percent < threshold) {
+    if (percent < NEXT_ORDER_MIN_PERCENT) {
       throw new ApiError(
         400,
         `You have an unpaid order (${row.order_number}) at ${percent.toFixed(0)}% paid. ` +
-          `Reach at least ${threshold}% before placing a new order.`
+          `It must be fully paid (100%) before you can place a new order.`
       );
     }
   }
@@ -253,21 +256,32 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
       }
     }
 
-    await assertCanPlaceOrder(client, buyer.id, buyer.kind);
+    await assertCanPlaceOrder(client, buyer.id);
 
     const customer = buyer; // kept as `customer` below to minimize diff noise
 
     const { orderItemRows, totalAmount } = await buildOrderItemRows(client, buyer, items);
 
-    // A distributor's own order isn't delivered by a sales rep — only
-    // customer orders get a sales rep assigned as the deliverer. Use the
-    // customer's ACTUAL assigned sales rep (set at registration/referral
-    // time) so every order they place — whether they click it themselves
-    // or their sales rep places it on their behalf — always routes to the
-    // same rep. Only fall back to a fresh state-based match if they
-    // somehow have no assignment yet.
+    // orders.distributor_id means two different things depending on who's
+    // buying: for a CUSTOMER it's the sales rep assigned to deliver/route
+    // this order (looked up via their assignment, below). For a true
+    // DISTRIBUTOR buying for themselves, there's no separate deliverer —
+    // the order IS their own activity, so this is set to their own
+    // distributor row instead. Leaving it null in that case (the previous
+    // behavior) silently hid self-placed orders from the admin's
+    // per-distributor history tab, even though the order was clearly
+    // theirs. (Deliberately NOT extended to a sales rep's own personal
+    // order — that would make their own purchase count as a customer sale
+    // toward their Target Overview, which reads the same distributor_id
+    // column, and that's a separate policy call this bug report didn't ask
+    // for.)
     let distributorId = null;
     if (customer.kind === "customer") {
+      // Use the customer's ACTUAL assigned sales rep (set at
+      // registration/referral time) so every order they place — whether
+      // they click it themselves or their sales rep places it on their
+      // behalf — always routes to the same rep. Only fall back to a fresh
+      // state-based match if they somehow have no assignment yet.
       const assignedResult = await client.query(
         `SELECT assigned_distributor_id FROM customer_profiles WHERE user_id = $1`,
         [buyer.id]
@@ -276,6 +290,8 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
       if (!distributorId) {
         distributorId = await findDistributorForState(client, customer.state);
       }
+    } else if (customer.kind === "distributor") {
+      distributorId = customer.distributorRowId || null;
     }
     const orderNumber = generateOrderNumber();
 
@@ -360,12 +376,19 @@ function validatePaymentAmount(order, amount) {
     );
   }
 
-  if (order.buyerKind === "distributor") {
-    const minPayment = (DISTRIBUTOR_MIN_PAYMENT_PERCENT / 100) * Number(order.total_amount);
-    if (Number(amount) < minPayment && !wouldCompleteOrder) {
+  // Customers and distributors can both pay in installments, but the FIRST
+  // successful payment on the order must clear a minimum floor (60% for a
+  // customer, 85% for a distributor) — once that's in, later top-ups can be
+  // any amount at all, no floor applies to them.
+  const isFirstPayment = order.payment.totalPaid === 0;
+  if (isFirstPayment && !wouldCompleteOrder && order.buyerKind !== "salesRepSelf") {
+    const minPercent =
+      order.buyerKind === "distributor" ? DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT : CUSTOMER_FIRST_PAYMENT_MIN_PERCENT;
+    const minPayment = (minPercent / 100) * Number(order.total_amount);
+    if (Number(amount) < minPayment) {
       throw new ApiError(
         400,
-        `Distributor payments must be at least ${DISTRIBUTOR_MIN_PAYMENT_PERCENT}% of the order total (₦${minPayment.toLocaleString()}) unless it completes the order.`
+        `Your first payment on this order must be at least ${minPercent}% of the total (₦${minPayment.toLocaleString()}) unless it completes the order.`
       );
     }
   }

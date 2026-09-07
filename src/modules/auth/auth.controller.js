@@ -95,6 +95,28 @@ const changePasswordHandler = asyncHandler(async (req, res) => {
   await authService.changePassword(req.user.id, currentPassword, newPassword);
   res.json({ success: true, message: "Password changed successfully" });
 });
+const forgotPasswordHandler = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  if (!email) throw new ApiError(400, "Email is required");
+  await authService.forgotPassword(email);
+  res.json({ success: true, message: "If an account exists for that email, a reset code has been sent." });
+});
+
+const verifyResetOtpHandler = asyncHandler(async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) throw new ApiError(400, "Email and code are required");
+  const resetToken = await authService.verifyResetOtp(email, code);
+  res.json({ success: true, data: { resetToken } });
+});
+
+const resetPasswordHandler = asyncHandler(async (req, res) => {
+  const { resetToken, newPassword } = req.body;
+  if (!resetToken || !newPassword) throw new ApiError(400, "Reset token and new password are required");
+  const { user, accessToken, refreshToken } = await authService.resetPassword(resetToken, newPassword);
+  setRefreshCookie(res, refreshToken);
+  res.json({ success: true, data: { user, accessToken } });
+});
+
 const acknowledgePaymentNoticeHandler = asyncHandler(async (req, res) => {
   await authService.acknowledgePaymentNotice(req.user.id);
   res.json({ success: true, message: "Acknowledged" });
@@ -116,4 +138,7 @@ module.exports = {
   changePasswordHandler,
   acknowledgePaymentNoticeHandler,
   updateLocationHandler,
+  forgotPasswordHandler,
+  verifyResetOtpHandler,
+  resetPasswordHandler,
 };
