@@ -503,9 +503,20 @@ async function listTrackRecordCustomers(userId) {
 
   const result = await db.query(
     `SELECT DISTINCT u.id, u.full_name, u.email, u.phone, cp.business_name,
-            (cp.assigned_distributor_id = $1) AS currently_assigned
+            (cp.assigned_distributor_id = $1) AS currently_assigned,
+            COALESCE(stats.total_owed, 0) AS total_owed,
+            COALESCE(stats.total_paid, 0) AS total_paid
      FROM users u
      JOIN customer_profiles cp ON cp.user_id = u.id
+     LEFT JOIN LATERAL (
+       SELECT SUM(o.total_amount) AS total_owed,
+              SUM(COALESCE(
+                (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
+                0
+              )) AS total_paid
+       FROM orders o
+       WHERE o.customer_id = u.id AND o.distributor_id = $1 AND o.deleted_at IS NULL AND o.status != 'cancelled'
+     ) stats ON true
      WHERE u.deleted_at IS NULL AND u.role = 'customer'
        AND (
          cp.assigned_distributor_id = $1
@@ -516,7 +527,14 @@ async function listTrackRecordCustomers(userId) {
      ORDER BY u.full_name ASC`,
     [distributorId]
   );
-  return result.rows;
+  // Payment "standing" (item 10) — the sales rep dashboard's auto-ranked
+  // view sorts customers by this: nothing owed (no active orders, or every
+  // order fully paid) reads as 100%, fully settled, same as a genuinely
+  // paid-off customer.
+  return result.rows.map((c) => ({
+    ...c,
+    paymentPercent: Number(c.total_owed) > 0 ? (Number(c.total_paid) / Number(c.total_owed)) * 100 : 100,
+  }));
 }
 
 // One customer's order history as this rep should see it: full detail if
