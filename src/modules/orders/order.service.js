@@ -228,6 +228,43 @@ async function buildOrderItemRows(client, buyer, items) {
   return { orderItemRows, totalAmount };
 }
 
+// Resolves which TRUE distributor (if any) this order's buyer chain
+// ultimately belongs to — used for Paystack split routing (payment.service's
+// initializePaystackPayment) and the admin Normal vs Distributor Orders
+// split. Frozen onto the order at creation time; a later reassignment never
+// retroactively reclassifies an already-placed order, same philosophy as
+// the existing Target Overview attribution.
+//   - A customer whose home distributor (their actual assigned_distributor_id,
+//     passed in as `homeDistributorId`) IS a true distributor -> that distributor.
+//   - A customer whose home distributor is a sales rep -> that rep's own
+//     parent (whoever onboarded the rep), if any, else null.
+//   - A sales rep buying for themselves -> their own parent distributor, if any.
+//   - A true distributor buying for themselves -> always null; they deal
+//     directly with the business, so splits never apply to their own order.
+async function resolveRegisteredUnderDistributor(client, buyer, homeDistributorId) {
+  if (buyer.kind === "distributor") return null;
+
+  if (buyer.kind === "salesRepSelf") {
+    if (!buyer.distributorRowId) return null;
+    const result = await client.query(
+      `SELECT registered_by_distributor_id FROM distributors WHERE id = $1`,
+      [buyer.distributorRowId]
+    );
+    return result.rows[0]?.registered_by_distributor_id || null;
+  }
+
+  // buyer.kind === "customer"
+  if (!homeDistributorId) return null;
+  const homeResult = await client.query(
+    `SELECT distributor_type, registered_by_distributor_id FROM distributors WHERE id = $1`,
+    [homeDistributorId]
+  );
+  const home = homeResult.rows[0];
+  if (!home) return null;
+  if (home.distributor_type === "distributor") return homeDistributorId;
+  return home.registered_by_distributor_id || null;
+}
+
 async function createOrder(buyerId, items, { placedByUserId } = {}) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new ApiError(400, "Order must contain at least one item");
@@ -297,12 +334,15 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
     } else if (customer.kind === "distributor") {
       distributorId = customer.distributorRowId || null;
     }
+
+    const registeredUnderDistributorId = await resolveRegisteredUnderDistributor(client, customer, distributorId);
+
     const orderNumber = generateOrderNumber();
 
     const orderResult = await client.query(
-      `INSERT INTO orders (order_number, customer_id, distributor_id, status, total_amount, placed_by_user_id)
-       VALUES ($1, $2, $3, 'pending', $4, $5) RETURNING *`,
-      [orderNumber, buyer.id, distributorId, totalAmount, placedByUserId || buyer.id]
+      `INSERT INTO orders (order_number, customer_id, distributor_id, status, total_amount, placed_by_user_id, registered_under_distributor_id)
+       VALUES ($1, $2, $3, 'pending', $4, $5, $6) RETURNING *`,
+      [orderNumber, buyer.id, distributorId, totalAmount, placedByUserId || buyer.id, registeredUnderDistributorId]
     );
     const order = orderResult.rows[0];
 

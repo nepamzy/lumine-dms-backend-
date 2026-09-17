@@ -1,12 +1,149 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { notifyDistributorApproved, notify } = require("../notifications/notification.service");
+const { paystackClient } = require("../../config/paystack");
 
 // Lazily required to avoid a require-cycle at module-load time (auth.service
 // doesn't depend on distributor.service, so this is safe either way, but
 // lazy keeps the dependency direction obvious).
 function authService() {
   return require("../auth/auth.service");
+}
+
+// Requires the caller to be a TRUE distributor (never a sales rep — only a
+// true distributor gets a Paystack subaccount, since only their affiliated
+// customers/reps' payments ever need to split away from main). Returns the
+// distributor row.
+async function requireTrueDistributor(userId) {
+  const distResult = await db.query(
+    `SELECT id, business_name, distributor_type, paystack_subaccount_code, paystack_settlement_bank,
+            paystack_account_number, paystack_account_name
+     FROM distributors WHERE user_id = $1`,
+    [userId]
+  );
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
+  const dist = distResult.rows[0];
+  if (dist.distributor_type !== "distributor") {
+    throw new ApiError(403, "Only distributors can manage a payout bank account");
+  }
+  return dist;
+}
+
+// Nigerian bank list, cached in-process — it changes rarely and Paystack
+// itself recommends caching it rather than calling /bank on every page
+// load. Refreshed at most once an hour.
+let bankListCache = null;
+let bankListCachedAt = 0;
+const BANK_LIST_CACHE_MS = 60 * 60 * 1000;
+
+async function listBanks() {
+  if (!process.env.PAYSTACK_SECRET_KEY) {
+    throw new ApiError(503, "Payments aren't connected yet — Paystack isn't configured. Contact support.");
+  }
+  if (bankListCache && Date.now() - bankListCachedAt < BANK_LIST_CACHE_MS) {
+    return bankListCache;
+  }
+  let response;
+  try {
+    response = await paystackClient().get("/bank", { params: { country: "nigeria", currency: "NGN" } });
+  } catch (err) {
+    if (bankListCache) return bankListCache; // stale cache beats a hard failure
+    throw new ApiError(502, "Could not load the bank list from Paystack. Please try again.");
+  }
+  bankListCache = (response.data.data || []).map((b) => ({ name: b.name, code: b.code }));
+  bankListCachedAt = Date.now();
+  return bankListCache;
+}
+
+// Free — resolves an account number + bank code to the account holder's
+// name via Paystack, WITHOUT creating or changing anything. Lets the
+// distributor see who they're about to attach as their payout account
+// before confirming. Never trust a client-supplied account name for the
+// actual subaccount creation below — always re-resolve server-side there.
+async function resolveBankAccount(userId, { bankCode, accountNumber }) {
+  await requireTrueDistributor(userId);
+  if (!process.env.PAYSTACK_SECRET_KEY) {
+    throw new ApiError(503, "Payments aren't connected yet — Paystack isn't configured. Contact support.");
+  }
+  if (!bankCode || !accountNumber) {
+    throw new ApiError(400, "Bank and account number are required");
+  }
+  let response;
+  try {
+    response = await paystackClient().get("/bank/resolve", {
+      params: { account_number: accountNumber, bank_code: bankCode },
+    });
+  } catch (err) {
+    throw new ApiError(
+      400,
+      err.response?.data?.message || "Couldn't verify that account. Please check the details and try again."
+    );
+  }
+  return { accountNumber: response.data.data.account_number, accountName: response.data.data.account_name };
+}
+
+// Creates the distributor's Paystack subaccount — only after they've seen
+// the resolved account name (via resolveBankAccount above) and explicitly
+// confirmed. percentage_charge: 0 means 0% of every split transaction goes
+// to Paystack's main/platform account — 100% goes to this subaccount (see
+// Paystack's subaccount docs: percentage_charge is the MAIN account's cut).
+// Re-resolves the account name itself rather than trusting whatever the
+// client sends back from the earlier verify step, so a tampered client
+// can never register a subaccount under a name that doesn't actually match
+// the bank's own records for that account number.
+async function createSubaccountForDistributor(userId, { bankCode, accountNumber }) {
+  const dist = await requireTrueDistributor(userId);
+  if (!process.env.PAYSTACK_SECRET_KEY) {
+    throw new ApiError(503, "Payments aren't connected yet — Paystack isn't configured. Contact support.");
+  }
+  if (!bankCode || !accountNumber) {
+    throw new ApiError(400, "Bank and account number are required");
+  }
+
+  const resolved = await resolveBankAccount(userId, { bankCode, accountNumber });
+
+  let response;
+  try {
+    response = await paystackClient().post("/subaccount", {
+      business_name: dist.business_name || resolved.accountName,
+      settlement_bank: bankCode,
+      account_number: accountNumber,
+      percentage_charge: 0,
+    });
+  } catch (err) {
+    throw new ApiError(
+      400,
+      err.response?.data?.message || "Couldn't set up your payout account with Paystack. Please try again."
+    );
+  }
+
+  const subaccountCode = response.data.data.subaccount_code;
+  await db.query(
+    `UPDATE distributors
+     SET paystack_subaccount_code = $1, paystack_settlement_bank = $2,
+         paystack_account_number = $3, paystack_account_name = $4
+     WHERE id = $5`,
+    [subaccountCode, bankCode, accountNumber, resolved.accountName, dist.id]
+  );
+
+  return {
+    subaccountCode,
+    bankCode,
+    accountNumber,
+    accountName: resolved.accountName,
+  };
+}
+
+// Read-only status for the distributor's own dashboard — never re-fetches
+// from Paystack, just reflects what's on file.
+async function getPayoutAccountStatus(userId) {
+  const dist = await requireTrueDistributor(userId);
+  return {
+    configured: !!dist.paystack_subaccount_code,
+    settlementBank: dist.paystack_settlement_bank || null,
+    accountNumber: dist.paystack_account_number || null,
+    accountName: dist.paystack_account_name || null,
+  };
 }
 
 // Registers a customer directly on behalf of the caller — for people
@@ -513,4 +650,8 @@ module.exports = {
   restoreUser,
   registerCustomerForRep,
   registerSalesRepForDistributor,
+  listBanks,
+  resolveBankAccount,
+  createSubaccountForDistributor,
+  getPayoutAccountStatus,
 };

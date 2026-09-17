@@ -53,6 +53,50 @@ router.post(
   })
 );
 
+// Payout bank account setup (true-distributor-only, enforced inside the
+// service). Three steps: list banks for the picker, resolve an account
+// number to its holder name (free, no side effects), then confirm to
+// actually create the Paystack subaccount.
+router.get(
+  "/me/banks",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const banks = await service.listBanks();
+    res.json({ success: true, data: banks });
+  })
+);
+
+router.post(
+  "/me/bank/resolve",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const result = await service.resolveBankAccount(req.user.id, req.body);
+    res.json({ success: true, data: result });
+  })
+);
+
+router.post(
+  "/me/subaccount",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const result = await service.createSubaccountForDistributor(req.user.id, req.body);
+    res.status(201).json({ success: true, data: result });
+  })
+);
+
+router.get(
+  "/me/payout-account",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const status = await service.getPayoutAccountStatus(req.user.id);
+    res.json({ success: true, data: status });
+  })
+);
+
 router.get(
   "/me/track-record",
   authenticate,

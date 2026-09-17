@@ -1,20 +1,39 @@
-const axios = require("axios");
 const crypto = require("crypto");
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { getOrderById, validatePaymentAmount, markPaidInFull } = require("../orders/order.service");
 const { notifyPaymentSuccess } = require("../notifications/notification.service");
+const { paystackClient } = require("../../config/paystack");
 
-const PAYSTACK_BASE_URL = "https://api.paystack.co";
+// Paystack Nigeria's standard fee schedule (local cards/bank transfer):
+// 1.5% + N100, the N100 flat portion waived under N2,500, whole fee capped
+// at N2,000. Verify against Paystack's live pricing page before relying on
+// this in production — fee schedules do change over time, and this project
+// couldn't reach paystack.com directly to re-confirm at implementation time.
+const PAYSTACK_FEE_PERCENT = 0.015;
+const PAYSTACK_FLAT_FEE = 100;
+const PAYSTACK_FLAT_FEE_WAIVER_THRESHOLD = 2500;
+const PAYSTACK_FEE_CAP = 2000;
 
-function paystackClient() {
-  return axios.create({
-    baseURL: PAYSTACK_BASE_URL,
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
+// Grosses up a naira amount so that, after Paystack deducts its own fee from
+// the CHARGE (not from the net amount we actually want), the recipient side
+// still nets exactly `netAmount`. Used for split (distributor-subaccount)
+// payments so the buyer — not the distributor — effectively covers
+// Paystack's cut, paired with bearer: "subaccount" below. Rounds up, never
+// down, so the distributor is never a kobo short at the buyer's expense of
+// a few extra kobo.
+function grossUpForPaystackFee(netAmount) {
+  const cappedCharge = netAmount + PAYSTACK_FEE_CAP;
+  const feeAtCappedCharge = PAYSTACK_FEE_PERCENT * cappedCharge + PAYSTACK_FLAT_FEE;
+  if (feeAtCappedCharge >= PAYSTACK_FEE_CAP) {
+    return Math.ceil(cappedCharge);
+  }
+  const chargeWithFlat = (netAmount + PAYSTACK_FLAT_FEE) / (1 - PAYSTACK_FEE_PERCENT);
+  if (chargeWithFlat >= PAYSTACK_FLAT_FEE_WAIVER_THRESHOLD) {
+    return Math.ceil(chargeWithFlat);
+  }
+  const chargeNoFlat = netAmount / (1 - PAYSTACK_FEE_PERCENT);
+  return Math.ceil(chargeNoFlat);
 }
 
 function generateReference() {
@@ -36,18 +55,55 @@ async function initializePaystackPayment(orderId, amount, buyer) {
   }
   validatePaymentAmount(order, amount);
 
+  // If this order's buyer chain belongs to a true distributor, this payment
+  // must split 100% to that distributor's Paystack subaccount (0% to main —
+  // see percentage_charge on subaccount creation) — never a silent fallback
+  // to a normal, undistributed payment. If the distributor hasn't finished
+  // verifying + confirming their bank account yet, block the payment with a
+  // clear message rather than ever routing their customer's money to main
+  // without the distributor's knowledge.
+  let subaccountCode = null;
+  let chargeAmount = Number(amount);
+  if (order.registered_under_distributor_id) {
+    const distResult = await db.query(
+      `SELECT paystack_subaccount_code FROM distributors WHERE id = $1`,
+      [order.registered_under_distributor_id]
+    );
+    subaccountCode = distResult.rows[0]?.paystack_subaccount_code || null;
+    if (!subaccountCode) {
+      throw new ApiError(
+        400,
+        "Your distributor hasn't finished setting up payments yet. Please contact them before paying."
+      );
+    }
+    // Gross up so Paystack's fee — deducted from the subaccount's share,
+    // via bearer: "subaccount" below — doesn't leave the distributor short.
+    // The buyer ends up covering it, same as the existing automatic
+    // bank-transfer-channel surcharge already does for a normal payment.
+    chargeAmount = grossUpForPaystackFee(Number(amount));
+  }
+
   const reference = generateReference();
-  const amountInKobo = Math.round(Number(amount) * 100);
+  const amountInKobo = Math.round(chargeAmount * 100);
+
+  const initPayload = {
+    email: buyer.email,
+    amount: amountInKobo,
+    reference,
+    callback_url: `${process.env.CLIENT_URL}/orders/${orderId}?paystack_ref=${reference}`,
+    metadata: { orderId, buyerId: buyer.id },
+  };
+  if (subaccountCode) {
+    initPayload.subaccount = subaccountCode;
+    // The subaccount side bears Paystack's fee (never main, which gets 0%
+    // of this transaction per its percentage_charge) — grossed up above so
+    // that cost still lands on the buyer, not the distributor.
+    initPayload.bearer = "subaccount";
+  }
 
   let response;
   try {
-    response = await paystackClient().post("/transaction/initialize", {
-      email: buyer.email,
-      amount: amountInKobo,
-      reference,
-      callback_url: `${process.env.CLIENT_URL}/orders/${orderId}?paystack_ref=${reference}`,
-      metadata: { orderId, buyerId: buyer.id },
-    });
+    response = await paystackClient().post("/transaction/initialize", initPayload);
   } catch (err) {
     throw new ApiError(502, "Could not start payment with Paystack. Please try again.");
   }
@@ -55,6 +111,12 @@ async function initializePaystackPayment(orderId, amount, buyer) {
   // Recorded as 'pending' immediately, before the buyer even reaches
   // Paystack's page — this way an abandoned/failed checkout is still
   // traceable, and confirmPaystackPayment has a row to update against.
+  // Always the NET amount the buyer intended toward their order — never the
+  // grossed-up charge — so the order's paid percentage isn't inflated by
+  // the fee buffer. confirmPaystackPayment's existing amountMatches check
+  // (transaction.amount >= this amount) already tolerates the actual
+  // Paystack charge being larger, exactly as it does for the bank-transfer
+  // auto-surcharge case.
   await db.query(
     `INSERT INTO order_payments (order_id, amount, recorded_by, status, paystack_reference)
      VALUES ($1, $2, $3, 'pending', $4)`,
@@ -247,4 +309,5 @@ module.exports = {
   isValidWebhookSignature,
   confirmPaystackPayment,
   reconcilePendingPayments,
+  grossUpForPaystackFee,
 };
