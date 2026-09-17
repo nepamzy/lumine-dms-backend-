@@ -28,17 +28,13 @@ async function listCustomers({ distributorId } = {}) {
 }
 
 // Admin manually reassigns a customer to a different distributor — e.g. when
-// the auto-matched or referring distributor isn't performing well. Passing
+// the auto-matched or referring distributor isn't performing well, or to
+// hand a customer to a true distributor to order on their behalf. Passing
 // distributorId = null unassigns the customer entirely.
 async function reassignDistributor(customerUserId, distributorId) {
   if (distributorId) {
     const dist = await db.query("SELECT id, distributor_type FROM distributors WHERE id = $1", [distributorId]);
     if (dist.rows.length === 0) throw new ApiError(404, "Distributor not found");
-    // Customers are never attached to a true distributor — only sales reps
-    // manage a customer book.
-    if (dist.rows[0].distributor_type === "distributor") {
-      throw new ApiError(400, "Customers can only be assigned to a sales rep, not a distributor");
-    }
   }
 
   const result = await db.query(

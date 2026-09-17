@@ -239,19 +239,23 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
 
     const buyer = await resolveBuyer(client, buyerId);
 
-    // If a sales rep is placing this order on the customer's behalf,
-    // confirm they're actually that customer's attached sales rep first.
+    // If a sales rep OR a true distributor is placing this order on the
+    // customer's behalf, confirm the customer is actually assigned to them
+    // first. No distributor_type restriction here — a true distributor gets
+    // the exact same on-behalf-of ordering rights a sales rep already had,
+    // for any customer assigned to them (however that assignment happened:
+    // direct registration, referral, or auto-match).
     if (placedByUserId && placedByUserId !== buyerId) {
       if (buyer.kind !== "customer") {
         throw new ApiError(400, "Orders can only be placed on behalf of a customer");
       }
-      const salesRepCheck = await client.query(
+      const assignedCheck = await client.query(
         `SELECT 1 FROM customer_profiles cp
          JOIN distributors d ON d.id = cp.assigned_distributor_id
-         WHERE cp.user_id = $1 AND d.user_id = $2 AND d.distributor_type = 'sales_rep'`,
+         WHERE cp.user_id = $1 AND d.user_id = $2`,
         [buyerId, placedByUserId]
       );
-      if (salesRepCheck.rows.length === 0) {
+      if (assignedCheck.rows.length === 0) {
         throw new ApiError(403, "You can only place orders for customers assigned to you");
       }
     }
@@ -482,9 +486,13 @@ async function listOrders(user, { status } = {}) {
     if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
     const dist = distResult.rows[0];
     if (dist.distributor_type === "distributor") {
-      // A true distributor sees their OWN purchases, same as a customer would.
-      conditions.push(`o.customer_id = $${i++}`);
-      values.push(user.id);
+      // A true distributor sees their OWN purchases (always, same as a
+      // customer would — never swept away), PLUS any orders they've placed
+      // on behalf of a customer assigned to them (those behave like a sales
+      // rep's working queue: subject to the same Target Overview sweep
+      // below, since it's customer business, not the distributor's own).
+      conditions.push(`(o.customer_id = $${i++} OR (o.distributor_id = $${i++} AND o.moved_to_target_overview_at IS NULL))`);
+      values.push(user.id, dist.id);
       isOwnPurchaseView = true;
     } else {
       // A sales rep sees orders they're assigned to deliver.
