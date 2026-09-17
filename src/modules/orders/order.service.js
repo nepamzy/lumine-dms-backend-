@@ -495,9 +495,16 @@ async function listOrders(user, { status } = {}) {
       values.push(user.id, dist.id);
       isOwnPurchaseView = true;
     } else {
-      // A sales rep sees orders they're assigned to deliver.
-      conditions.push(`o.distributor_id = $${i++}`);
-      values.push(dist.id);
+      // A sales rep sees orders they're assigned to deliver, PLUS their own
+      // personal orders (which never get distributor_id set to themselves —
+      // see createOrder — so without this OR, a rep's own order would be
+      // placeable and payable but then permanently invisible in their own
+      // Orders list, since customer_id = distributor_id never matches
+      // either branch on its own). Own purchases stay visible past the
+      // Target Overview sweep, same as every other buyer's own purchases.
+      conditions.push(`(o.customer_id = $${i++} OR (o.distributor_id = $${i++} AND o.moved_to_target_overview_at IS NULL))`);
+      values.push(user.id, dist.id);
+      isOwnPurchaseView = true;
     }
   }
   // admin: no filter, sees everything (except the Target Overview sweep below)
