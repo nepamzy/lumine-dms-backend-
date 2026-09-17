@@ -558,6 +558,109 @@ async function getCustomerHistoryForRep(userId, customerId) {
   return { customer, orders };
 }
 
+// Read-only visibility for a TRUE distributor (item 8) — every real
+// customer anywhere in their hierarchy: assigned directly to them, or to
+// one of their sales reps. Deliberately no management capability lives
+// here or anywhere else in this file for a true distributor's view of
+// their hierarchy — payment approval and order management stay
+// exclusively admin-controlled.
+async function listHierarchyCustomers(userId) {
+  const dist = await requireTrueDistributor(userId);
+  const result = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name,
+            CASE WHEN cp.assigned_distributor_id = $1 THEN NULL ELSE ru.full_name END AS assigned_rep_name
+     FROM customer_profiles cp
+     JOIN users u ON u.id = cp.user_id
+     LEFT JOIN distributors rd ON rd.id = cp.assigned_distributor_id
+     LEFT JOIN users ru ON ru.id = rd.user_id
+     WHERE u.deleted_at IS NULL AND u.role = 'customer'
+       AND (
+         cp.assigned_distributor_id = $1
+         OR cp.assigned_distributor_id IN (SELECT id FROM distributors WHERE registered_by_distributor_id = $1)
+       )
+     ORDER BY u.full_name ASC`,
+    [dist.id]
+  );
+  return result.rows;
+}
+
+// Full order/payment detail for one hierarchy customer — same read-only
+// guarantee as listHierarchyCustomers above.
+async function getHierarchyCustomerHistory(userId, customerId) {
+  const dist = await requireTrueDistributor(userId);
+  const customerResult = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name, cp.assigned_distributor_id
+     FROM users u JOIN customer_profiles cp ON cp.user_id = u.id
+     WHERE u.id = $1 AND u.deleted_at IS NULL AND u.role = 'customer'`,
+    [customerId]
+  );
+  if (customerResult.rows.length === 0) throw new ApiError(404, "Customer not found");
+  const customer = customerResult.rows[0];
+
+  let inHierarchy = customer.assigned_distributor_id === dist.id;
+  if (!inHierarchy && customer.assigned_distributor_id) {
+    const repCheck = await db.query(
+      `SELECT 1 FROM distributors WHERE id = $1 AND registered_by_distributor_id = $2`,
+      [customer.assigned_distributor_id, dist.id]
+    );
+    inHierarchy = repCheck.rows.length > 0;
+  }
+  if (!inHierarchy) throw new ApiError(403, "This customer isn't in your hierarchy");
+
+  const ordersResult = await db.query(
+    `SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
+            COALESCE(
+              (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
+              0
+            ) AS paid_amount,
+            COALESCE(
+              (SELECT json_agg(json_build_object(
+                 'productName', pr.name, 'size', v.size, 'quantity', oi.quantity,
+                 'unitPrice', oi.unit_price, 'lineTotal', oi.line_total
+               ) ORDER BY pr.name)
+               FROM order_items oi
+               JOIN products pr ON pr.id = oi.product_id
+               LEFT JOIN product_variants v ON v.id = oi.variant_id
+               WHERE oi.order_id = o.id),
+              '[]'
+            ) AS items
+     FROM orders o
+     WHERE o.customer_id = $1 AND o.deleted_at IS NULL
+     ORDER BY o.created_at DESC`,
+    [customerId]
+  );
+  const orders = ordersResult.rows.map((o) => ({
+    ...o,
+    payment_percent: Number(o.total_amount) > 0 ? (Number(o.paid_amount) / Number(o.total_amount)) * 100 : 0,
+  }));
+
+  return { customer, orders };
+}
+
+// Read-only visibility for a TRUE distributor (item 8) — every sales rep
+// they onboarded, with summary stats (their own customer count + revenue
+// from those customers' orders). No approval/suspend/remove action lives
+// here — that stays exclusively admin-controlled, same as customers above.
+async function listHierarchySalesReps(userId) {
+  const dist = await requireTrueDistributor(userId);
+  const result = await db.query(
+    `SELECT d.id, u.full_name, u.email, u.phone, d.business_name, d.approval_status, u.status AS user_status,
+            (SELECT COUNT(*) FROM customer_profiles cp WHERE cp.assigned_distributor_id = d.id) AS customer_count,
+            COALESCE(
+              (SELECT SUM(op.amount) FROM order_payments op
+               JOIN orders o ON o.id = op.order_id
+               WHERE o.distributor_id = d.id AND op.status = 'successful'),
+              0
+            ) AS total_revenue
+     FROM distributors d
+     JOIN users u ON u.id = d.user_id
+     WHERE d.registered_by_distributor_id = $1 AND u.deleted_at IS NULL
+     ORDER BY u.full_name ASC`,
+    [dist.id]
+  );
+  return result.rows;
+}
+
 // Admin-only. A sales rep's Target Overview for one calendar month: every
 // order that's been through the monthly sweep (moved_to_target_overview_at
 // set), credited to whichever month it actually reached 100% paid
@@ -684,4 +787,7 @@ module.exports = {
   resolveBankAccount,
   createSubaccountForDistributor,
   getPayoutAccountStatus,
+  listHierarchyCustomers,
+  getHierarchyCustomerHistory,
+  listHierarchySalesReps,
 };

@@ -97,6 +97,40 @@ router.get(
   })
 );
 
+// Read-only visibility for a true distributor (item 8) — full order/payment
+// detail on every customer and sales rep in their hierarchy. True-
+// distributor-only, enforced inside the service. No management/approval
+// action lives behind any of these — that stays exclusively admin's.
+router.get(
+  "/me/hierarchy/customers",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const customers = await service.listHierarchyCustomers(req.user.id);
+    res.json({ success: true, data: customers });
+  })
+);
+
+router.get(
+  "/me/hierarchy/customers/:customerId",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const history = await service.getHierarchyCustomerHistory(req.user.id, req.params.customerId);
+    res.json({ success: true, data: history });
+  })
+);
+
+router.get(
+  "/me/hierarchy/sales-reps",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const reps = await service.listHierarchySalesReps(req.user.id);
+    res.json({ success: true, data: reps });
+  })
+);
+
 router.get(
   "/me/track-record",
   authenticate,
