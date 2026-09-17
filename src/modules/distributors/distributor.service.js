@@ -423,9 +423,39 @@ async function getDistributorHistory(distributorId) {
   const pendingPayments = orders.filter((o) => o.payment_percent < 100).length;
   const failedPayments = 0;
 
+  // Distinct from the `orders` list above (o.distributor_id — direct
+  // delivery/assignment to this exact row): this is every order anywhere in
+  // this TRUE distributor's whole hierarchy — a customer or sales rep
+  // registered under them, or that sales rep's own personal orders climbing
+  // up to this distributor. Empty for a sales rep's own history (a sales
+  // rep is never itself a "registered_under" target — see
+  // resolveRegisteredUnderDistributor in order.service.js), which is
+  // expected: only a true distributor has a hierarchy to report on.
+  const repOrdersResult = await db.query(
+    `SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
+            cu.full_name AS customer_full_name, cp.business_name AS customer_business_name,
+            pu.full_name AS placed_by_name,
+            COALESCE(
+              (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
+              0
+            ) AS paid_amount
+     FROM orders o
+     LEFT JOIN users cu ON cu.id = o.customer_id
+     LEFT JOIN customer_profiles cp ON cp.user_id = o.customer_id
+     LEFT JOIN users pu ON pu.id = o.placed_by_user_id
+     WHERE o.registered_under_distributor_id = $1 AND o.deleted_at IS NULL
+     ORDER BY o.created_at DESC`,
+    [distributorId]
+  );
+  const repCustomerOrders = repOrdersResult.rows.map((o) => ({
+    ...o,
+    payment_percent: Number(o.total_amount) > 0 ? (Number(o.paid_amount) / Number(o.total_amount)) * 100 : 0,
+  }));
+
   return {
     profile: profileResult.rows[0],
     orders,
+    repCustomerOrders,
     summary: { totalOrders, totalRevenue, pendingPayments, failedPayments },
   };
 }
