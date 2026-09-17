@@ -561,9 +561,12 @@ async function listOrders(user, { status } = {}) {
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await db.query(
     `SELECT o.*, u.full_name AS customer_name, u.state AS customer_state, u.role AS buyer_role,
+            COALESCE(rud.business_name, rudu.full_name) AS registered_under_distributor_name,
             COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid_amount
      FROM orders o
      JOIN users u ON u.id = o.customer_id
+     LEFT JOIN distributors rud ON rud.id = o.registered_under_distributor_id
+     LEFT JOIN users rudu ON rudu.id = rud.user_id
      ${where}
      ORDER BY o.created_at DESC`,
     values
