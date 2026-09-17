@@ -9,27 +9,21 @@ function authService() {
   return require("../auth/auth.service");
 }
 
-// Sales-rep-only: registers a customer directly on their behalf — for
-// people without an Android phone / who can't do the signup flow
-// themselves. Same fields and rules as a normal customer signup (business
-// name still mandatory), except location isn't required and the customer
-// is auto-assigned straight to this rep.
-async function registerCustomerForRep(salesRepUserId, payload) {
+// Registers a customer directly on behalf of the caller — for people
+// without an Android phone / who can't do the signup flow themselves. Same
+// fields and rules as a normal customer signup (business name still
+// mandatory), except location isn't required and the customer is
+// auto-assigned straight to the caller. Callable by a sales rep (existing
+// behavior) or a true distributor (new — distributors can now build their
+// own customer book directly, same as a sales rep always could).
+async function registerCustomerForRep(callerUserId, payload) {
   const repResult = await db.query(
     `SELECT id, distributor_type FROM distributors WHERE user_id = $1`,
-    [salesRepUserId]
+    [callerUserId]
   );
-  const isSalesRep =
-    repResult.rows.length > 0 &&
-    String(repResult.rows[0].distributor_type || "").trim().toLowerCase() === "sales_rep";
-  if (!isSalesRep) {
-    console.error(
-      "registerCustomerForRep blocked:",
-      repResult.rows.length === 0
-        ? `no distributors row found for user_id ${salesRepUserId}`
-        : `distributor_type was "${repResult.rows[0].distributor_type}"`
-    );
-    throw new ApiError(403, "Only sales reps can register a customer directly");
+  if (repResult.rows.length === 0) {
+    console.error("registerCustomerForRep blocked: no distributors row found for user_id", callerUserId);
+    throw new ApiError(403, "Only sales reps and distributors can register a customer directly");
   }
 
   const { businessName, customerType, deliveryAddress, password, ...rest } = payload;
@@ -47,6 +41,48 @@ async function registerCustomerForRep(salesRepUserId, payload) {
     role: "customer",
     extra: { businessName, customerType, deliveryAddress },
     registeredByDistributorId: repResult.rows[0].id,
+  });
+}
+
+// Distributor-only (never a sales rep — a sales rep doesn't manage other
+// reps): onboards a new sales rep directly. Unlike registerCustomerForRep,
+// this creates a REAL, real account — the new rep needs to actually log in
+// and work — so email/phone/password all come from the form the
+// distributor fills in on their behalf, and the rep can change the
+// password later (or use forgot-password if they don't know what was set).
+// Auto-approved and immediately active — the registering distributor is
+// vouching for them, same as their own customer registrations never
+// needing separate admin approval.
+async function registerSalesRepForDistributor(distributorUserId, payload) {
+  const distResult = await db.query(
+    `SELECT id, distributor_type FROM distributors WHERE user_id = $1`,
+    [distributorUserId]
+  );
+  const isTrueDistributor =
+    distResult.rows.length > 0 &&
+    String(distResult.rows[0].distributor_type || "").trim().toLowerCase() === "distributor";
+  if (!isTrueDistributor) {
+    throw new ApiError(403, "Only distributors can register a sales rep directly");
+  }
+
+  const { fullName, email, phone, password, state, localGovernment, businessName, address } = payload;
+  if (!fullName || !email || !phone || !password || !state) {
+    throw new ApiError(400, "Full name, email, phone, password, and state are required");
+  }
+  if (password.length < 8) {
+    throw new ApiError(400, "Password must be at least 8 characters");
+  }
+
+  return authService().register({
+    fullName,
+    email,
+    phone,
+    password,
+    role: "distributor",
+    state,
+    localGovernment,
+    extra: { distributorType: "sales_rep", businessName, address },
+    registeredByDistributorId: distResult.rows[0].id,
   });
 }
 
@@ -257,9 +293,10 @@ async function getDistributorHistory(distributorId) {
   };
 }
 
-// A sales rep's own book of customers — used to pick who they're placing
-// an order on behalf of. Never exposed to a true distributor (they don't
-// manage customers at all).
+// The caller's own book of customers with a real account — used to pick
+// who they're placing an order on behalf of. Both a sales rep and a true
+// distributor can have one now (a distributor's own customer book, per
+// their direct registration power).
 async function listMyCustomers(userId) {
   const distResult = await db.query(
     "SELECT id, distributor_type FROM distributors WHERE user_id = $1",
@@ -267,9 +304,6 @@ async function listMyCustomers(userId) {
   );
   if (distResult.rows.length === 0) throw new ApiError(404, "Distributor profile not found");
   const dist = distResult.rows[0];
-  if (dist.distributor_type !== "sales_rep") {
-    throw new ApiError(403, "Only sales reps have a customer book");
-  }
 
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name
@@ -478,4 +512,5 @@ module.exports = {
   listTrash,
   restoreUser,
   registerCustomerForRep,
+  registerSalesRepForDistributor,
 };

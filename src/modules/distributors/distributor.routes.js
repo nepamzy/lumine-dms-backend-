@@ -27,14 +27,28 @@ router.get(
   })
 );
 
-// No-Android-phone provision: a sales rep fills out the same fields a
-// customer would, on the customer's behalf.
+// No-Android-phone provision: a sales rep OR a true distributor fills out
+// the same fields a customer would, on the customer's behalf.
 router.post(
   "/me/customers/register",
   authenticate,
   authorize("distributor"),
   asyncHandler(async (req, res) => {
     const user = await service.registerCustomerForRep(req.user.id, req.body);
+    res.status(201).json({ success: true, data: user });
+  })
+);
+
+// Distributor-only (enforced inside the service): onboards a new sales rep
+// directly, auto-approved. Route-level check just confirms "some kind of
+// distributor-table user" — the true-distributor-only rule lives in the
+// service, same pattern as registerCustomerForRep above.
+router.post(
+  "/me/sales-reps/register",
+  authenticate,
+  authorize("distributor"),
+  asyncHandler(async (req, res) => {
+    const user = await service.registerSalesRepForDistributor(req.user.id, req.body);
     res.status(201).json({ success: true, data: user });
   })
 );

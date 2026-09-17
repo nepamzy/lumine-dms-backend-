@@ -114,7 +114,12 @@ async function register({ fullName, email, phone, password, role, state, latitud
         role,
         state,
         localGovernment || null,
-        role === "distributor" ? "pending" : "active", // distributors need approval
+        // Distributors need approval — except a sales rep directly onboarded
+        // by a distributor (registeredByDistributorId set on a distributor
+        // role), who goes straight to active: the registering distributor is
+        // vouching for them, same reasoning as a sales rep's own customer
+        // registrations never needing separate approval.
+        role === "distributor" && !registeredByDistributorId ? "pending" : "active",
         latitude || null,
         longitude || null,
         latitude && longitude ? new Date() : null,
@@ -126,10 +131,15 @@ async function register({ fullName, email, phone, password, role, state, latitud
     if (role === "distributor") {
       const distributorType = extra.distributorType === "distributor" ? "distributor" : "sales_rep";
       const referralCode = await generateUniqueReferralCode(client, extra.businessName || fullName);
+      // A sales rep onboarded directly by a distributor is auto-approved
+      // (matches the account status set above) and gets that distributor
+      // recorded as who onboarded them, for the admin Orders split view and
+      // per-distributor drilldown.
+      const approvalStatus = registeredByDistributorId ? "approved" : "pending";
       await client.query(
-        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code, distributor_type)
-         VALUES ($1, $2, $3, 'pending', $4, $5)`,
-        [user.id, extra.territoryId || null, extra.businessName || null, referralCode, distributorType]
+        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code, distributor_type, registered_by_distributor_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [user.id, extra.territoryId || null, extra.businessName || null, approvalStatus, referralCode, distributorType, registeredByDistributorId || null]
       );
     } else if (role === "customer") {
       // Referral link (?ref=CODE) takes priority. If the customer didn't come

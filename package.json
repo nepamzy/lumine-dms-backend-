@@ -9,7 +9,7 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/config/seed.js",
     "test": "node --test",
-    "postinstall": "node scripts/apply-migration-026.js"
+    "postinstall": "node scripts/apply-migrations.js"
   },
   "dependencies": {
     "@sentry/node": "^10.73.0",
