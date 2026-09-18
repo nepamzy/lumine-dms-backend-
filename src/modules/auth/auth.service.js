@@ -194,23 +194,28 @@ async function register({ fullName, email, phone, password, role, state, latitud
   }
 }
 
+// `email` here is really "whatever identifier the login form was given" —
+// matched against either column. Customer email is optional at signup (see
+// migration 024), so phone has to work as a login identifier too, or a
+// customer who registered without an email would have no way back in.
+// Phone is always required + unique among active accounts, so this is safe.
 async function login({ email, password }) {
   const result = await db.query(
     `SELECT u.*, cp.registered_by_distributor_id
      FROM users u
      LEFT JOIN customer_profiles cp ON cp.user_id = u.id
-     WHERE u.email = $1 AND u.deleted_at IS NULL`,
+     WHERE (u.email = $1 OR u.phone = $1) AND u.deleted_at IS NULL`,
     [email]
   );
   const user = result.rows[0];
 
   if (!user) {
-    throw new ApiError(401, "Incorrect email or password");
+    throw new ApiError(401, "Incorrect email/phone or password");
   }
 
   const passwordMatches = await bcrypt.compare(password, user.password_hash);
   if (!passwordMatches) {
-    throw new ApiError(401, "Incorrect email or password");
+    throw new ApiError(401, "Incorrect email/phone or password");
   }
 
   // Customers a sales rep registered directly (no-Android-phone provision)
@@ -396,14 +401,17 @@ function generateOtp() {
   return crypto.randomInt(0, 10 ** OTP_LENGTH).toString().padStart(OTP_LENGTH, "0");
 }
 
-// Deliberately silent about whether the email has an account — the
+// Deliberately silent about whether the identifier has an account — the
 // response is identical either way, so this never doubles as an
-// email-enumeration probe.
+// email/phone-enumeration probe. `email` here can be either — matched
+// against both columns, same as login() — since a customer's email is
+// optional and phone is always present, they need to be able to reset a
+// forgotten password using just their phone.
 async function forgotPassword(email) {
-  if (!email) throw new ApiError(400, "Email is required");
+  if (!email) throw new ApiError(400, "Email or phone is required");
 
   const result = await db.query(
-    "SELECT id, email, phone FROM users WHERE email = $1 AND deleted_at IS NULL",
+    "SELECT id, email, phone FROM users WHERE (email = $1 OR phone = $1) AND deleted_at IS NULL",
     [email]
   );
   const user = result.rows[0];
@@ -434,10 +442,10 @@ async function forgotPassword(email) {
 // next step, but not a login session. The code itself is single-use: a
 // correct guess clears the stored hash immediately so it can't be replayed.
 async function verifyResetOtp(email, code) {
-  if (!email || !code) throw new ApiError(400, "Email and code are required");
+  if (!email || !code) throw new ApiError(400, "Email/phone and code are required");
 
   const result = await db.query(
-    "SELECT id, reset_otp_hash, reset_otp_expires_at, reset_otp_attempts FROM users WHERE email = $1 AND deleted_at IS NULL",
+    "SELECT id, reset_otp_hash, reset_otp_expires_at, reset_otp_attempts FROM users WHERE (email = $1 OR phone = $1) AND deleted_at IS NULL",
     [email]
   );
   const user = result.rows[0];

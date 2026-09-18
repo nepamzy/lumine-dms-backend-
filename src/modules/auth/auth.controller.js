@@ -20,7 +20,12 @@ function setRefreshCookie(res, token) {
 
 const registerHandler = asyncHandler(async (req, res) => {
   const { fullName, email, phone, password, role, state, latitude, longitude, localGovernment, ...extra } = req.body;
-  if (!fullName || !email || !phone || !password || !role || !state) {
+  // Email is optional for customers — phone (required, unique — see
+  // migration 001/013) works as their login identifier too (auth.service's
+  // login() matches either column). Distributors and sales reps still need
+  // an email: it's how they're found/contacted for approval and business
+  // correspondence.
+  if (!fullName || !phone || !password || !role || !state || (role !== "customer" && !email)) {
     throw new ApiError(400, "Missing required fields");
   }
   if (password.length < 8) {
@@ -52,7 +57,7 @@ const registerHandler = asyncHandler(async (req, res) => {
 const loginHandler = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
-    throw new ApiError(400, "Email and password are required");
+    throw new ApiError(400, "Email/phone and password are required");
   }
 
   const { user, accessToken, refreshToken } = await authService.login({
@@ -97,14 +102,14 @@ const changePasswordHandler = asyncHandler(async (req, res) => {
 });
 const forgotPasswordHandler = asyncHandler(async (req, res) => {
   const { email } = req.body;
-  if (!email) throw new ApiError(400, "Email is required");
+  if (!email) throw new ApiError(400, "Email or phone is required");
   await authService.forgotPassword(email);
-  res.json({ success: true, message: "If an account exists for that email, a reset code has been sent." });
+  res.json({ success: true, message: "If an account exists for that email or phone, a reset code has been sent." });
 });
 
 const verifyResetOtpHandler = asyncHandler(async (req, res) => {
   const { email, code } = req.body;
-  if (!email || !code) throw new ApiError(400, "Email and code are required");
+  if (!email || !code) throw new ApiError(400, "Email/phone and code are required");
   const resetToken = await authService.verifyResetOtp(email, code);
   res.json({ success: true, data: { resetToken } });
 });
