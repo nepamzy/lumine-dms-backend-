@@ -222,6 +222,19 @@ router.patch(
   })
 );
 
+// Reclassifies an existing account between Distributor and Sales Rep.
+// Covers accounts stuck on the pre-split default (see migration 006) or
+// anyone who was registered as the wrong kind — fixing it here is what
+// actually makes the hierarchy tabs show up on their dashboard, no DB
+// console needed.
+router.patch(
+  "/:id/type",
+  asyncHandler(async (req, res) => {
+    const distributor = await service.changeDistributorType(req.params.id, req.body.distributorType);
+    res.json({ success: true, data: distributor });
+  })
+);
+
 router.get(
   "/:id/history",
   asyncHandler(async (req, res) => {

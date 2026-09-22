@@ -328,6 +328,28 @@ async function suspendDistributor(distributorId) {
   }
 }
 
+// Admin-only. Corrects an account's distributor_type after the fact —
+// needed because every row defaulted to 'sales_rep' when this type split
+// was introduced (migration 006), so anyone who signed up before then (or
+// through a flow that didn't explicitly pick "Distributor") is stuck on
+// the Sales Rep dashboard with no way to self-fix it. This is a pure
+// reclassification: approval_status, territory, referral history, and
+// every existing order/customer link are untouched, so a promoted account
+// immediately starts seeing the hierarchy tabs (listHierarchyCustomers,
+// listHierarchySalesReps) built from its existing registered_by/assigned
+// relationships — nothing needs to be backfilled.
+async function changeDistributorType(distributorId, distributorType) {
+  if (!["sales_rep", "distributor"].includes(distributorType)) {
+    throw new ApiError(400, "distributorType must be 'sales_rep' or 'distributor'");
+  }
+  const result = await db.query(
+    `UPDATE distributors SET distributor_type = $1 WHERE id = $2 RETURNING *`,
+    [distributorType, distributorId]
+  );
+  if (result.rows.length === 0) throw new ApiError(404, "Distributor not found");
+  return result.rows[0];
+}
+
 async function listTerritories() {
   const result = await db.query("SELECT * FROM territories ORDER BY state ASC, name ASC");
   return result.rows;
@@ -787,6 +809,7 @@ module.exports = {
   approveDistributor,
   rejectDistributor,
   suspendDistributor,
+  changeDistributorType,
   listTerritories,
   createTerritory,
   getReferralInfo,
