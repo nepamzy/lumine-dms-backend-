@@ -604,8 +604,7 @@ async function getCustomerHistoryForRep(userId, customerId) {
 // here or anywhere else in this file for a true distributor's view of
 // their hierarchy — payment approval and order management stay
 // exclusively admin-controlled.
-async function listHierarchyCustomers(userId) {
-  const dist = await requireTrueDistributor(userId);
+async function _hierarchyCustomersForDistId(distId) {
   const result = await db.query(
     `SELECT u.id, u.full_name, u.email, u.phone, cp.business_name,
             CASE WHEN cp.assigned_distributor_id = $1 THEN NULL ELSE ru.full_name END AS assigned_rep_name
@@ -619,9 +618,14 @@ async function listHierarchyCustomers(userId) {
          OR cp.assigned_distributor_id IN (SELECT id FROM distributors WHERE registered_by_distributor_id = $1)
        )
      ORDER BY u.full_name ASC`,
-    [dist.id]
+    [distId]
   );
   return result.rows;
+}
+
+async function listHierarchyCustomers(userId) {
+  const dist = await requireTrueDistributor(userId);
+  return _hierarchyCustomersForDistId(dist.id);
 }
 
 // Full order/payment detail for one hierarchy customer — same read-only
@@ -681,8 +685,7 @@ async function getHierarchyCustomerHistory(userId, customerId) {
 // they onboarded, with summary stats (their own customer count + revenue
 // from those customers' orders). No approval/suspend/remove action lives
 // here — that stays exclusively admin-controlled, same as customers above.
-async function listHierarchySalesReps(userId) {
-  const dist = await requireTrueDistributor(userId);
+async function _hierarchySalesRepsForDistId(distId) {
   const result = await db.query(
     `SELECT d.id, u.full_name, u.email, u.phone, d.business_name, d.approval_status, u.status AS user_status,
             (SELECT COUNT(*) FROM customer_profiles cp WHERE cp.assigned_distributor_id = d.id) AS customer_count,
@@ -696,9 +699,33 @@ async function listHierarchySalesReps(userId) {
      JOIN users u ON u.id = d.user_id
      WHERE d.registered_by_distributor_id = $1 AND u.deleted_at IS NULL
      ORDER BY u.full_name ASC`,
-    [dist.id]
+    [distId]
   );
   return result.rows;
+}
+
+async function listHierarchySalesReps(userId) {
+  const dist = await requireTrueDistributor(userId);
+  return _hierarchySalesRepsForDistId(dist.id);
+}
+
+// Admin-only counterparts of the two above — same queries, just scoped by
+// distributorId directly (no requireTrueDistributor ownership check, since
+// the caller is admin, not the distributor themself). Lets the admin
+// Distributors tab show a roster of who's actually in a distributor's
+// hierarchy, not just their order history.
+async function adminListHierarchyCustomers(distributorId) {
+  const distResult = await db.query("SELECT id, distributor_type FROM distributors WHERE id = $1", [distributorId]);
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor not found");
+  if (distResult.rows[0].distributor_type !== "distributor") return [];
+  return _hierarchyCustomersForDistId(distributorId);
+}
+
+async function adminListHierarchySalesReps(distributorId) {
+  const distResult = await db.query("SELECT id, distributor_type FROM distributors WHERE id = $1", [distributorId]);
+  if (distResult.rows.length === 0) throw new ApiError(404, "Distributor not found");
+  if (distResult.rows[0].distributor_type !== "distributor") return [];
+  return _hierarchySalesRepsForDistId(distributorId);
 }
 
 // Admin-only. A sales rep's Target Overview for one calendar month: every
@@ -831,4 +858,6 @@ module.exports = {
   listHierarchyCustomers,
   getHierarchyCustomerHistory,
   listHierarchySalesReps,
+  adminListHierarchyCustomers,
+  adminListHierarchySalesReps,
 };

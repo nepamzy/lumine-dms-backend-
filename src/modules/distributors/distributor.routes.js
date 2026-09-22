@@ -243,6 +243,26 @@ router.get(
   })
 );
 
+// Roster views for the admin Distributors tab — every sales rep and every
+// hierarchy customer a TRUE distributor has, distinct from getDistributorHistory
+// above (which is order-based). Empty array for a sales rep row (they have
+// no sub-hierarchy of their own).
+router.get(
+  "/:id/hierarchy/sales-reps",
+  asyncHandler(async (req, res) => {
+    const reps = await service.adminListHierarchySalesReps(req.params.id);
+    res.json({ success: true, data: reps });
+  })
+);
+
+router.get(
+  "/:id/hierarchy/customers",
+  asyncHandler(async (req, res) => {
+    const customers = await service.adminListHierarchyCustomers(req.params.id);
+    res.json({ success: true, data: customers });
+  })
+);
+
 router.get(
   "/:id/target-overview",
   asyncHandler(async (req, res) => {
