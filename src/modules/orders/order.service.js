@@ -105,7 +105,7 @@ async function assertCanPlaceOrder(client, buyerId) {
     `SELECT o.id, o.order_number, o.total_amount,
             COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid
      FROM orders o
-     WHERE o.customer_id = $1 AND o.status != 'cancelled'`,
+     WHERE o.customer_id = $1 AND o.status != 'cancelled' AND o.deleted_at IS NULL`,
     [buyerId]
   );
 
