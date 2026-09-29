@@ -47,6 +47,12 @@ const editItemsHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
+const shortfallHandler = asyncHandler(async (req, res) => {
+  const { items, note } = req.body;
+  const result = await orderService.recordOrderShortfall(req.params.id, items, req.user, note);
+  res.json({ success: true, data: result });
+});
+
 const deleteHandler = asyncHandler(async (req, res) => {
   const result = await orderService.deleteOrder(req.params.id, req.user);
   res.json({ success: true, message: "Order removed", data: result });
@@ -111,6 +117,7 @@ module.exports = {
   getOneHandler,
   cancelHandler,
   editItemsHandler,
+  shortfallHandler,
   deleteHandler,
   restoreHandler,
   listDeletedHandler,

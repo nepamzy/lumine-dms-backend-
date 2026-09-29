@@ -558,7 +558,7 @@ async function getOrderById(id, { includeDeleted = false } = {}) {
     }
   }
 
-  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry, paymentDue, firstPaymentMinPercent };
+  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry, paymentDue, firstPaymentMinPercent, shortfalls: await getOrderShortfalls(id) };
 }
 
 // Customers see only their own orders; distributors see only assigned orders; admins see all
@@ -790,6 +790,109 @@ async function editOrderItems(orderId, items, actingUser) {
   } finally {
     client.release();
   }
+}
+
+// Admin-only. Records units that couldn't actually be produced for this
+// order — reduces the matching order_items quantities (and total_amount)
+// directly, the same way editOrderItems does, but works at ANY stage
+// (including well past the 48h edit cutoff, even after delivery) since a
+// production shortfall is a fact about reality that doesn't care whether
+// the person happened to already edit their own order in time. Logged to
+// order_shortfalls for a visible "here's what changed and why" trail
+// instead of the total just quietly dropping.
+//
+// Deliberately does NOT touch product_batches.quantity_on_hand — unlike
+// cancelling/editing an order (where the reserved stock genuinely exists
+// and is being freed up for someone else), a shortfall means that stock
+// never actually existed to begin with. Releasing it back to the pool
+// would let it be sold again for product that isn't there.
+async function recordOrderShortfall(orderId, shortfallItems, actingUser, note) {
+  if (actingUser.role !== "admin") throw new ApiError(403, "Only admin can record a production shortfall");
+  if (!Array.isArray(shortfallItems) || shortfallItems.length === 0) {
+    throw new ApiError(400, "Provide at least one item that couldn't be produced");
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const orderResult = await client.query(`SELECT * FROM orders WHERE id = $1 FOR UPDATE`, [orderId]);
+    if (orderResult.rows.length === 0 || orderResult.rows[0].deleted_at) throw new ApiError(404, "Order not found");
+    const order = orderResult.rows[0];
+    if (!["pending", "paid"].includes(order.status)) {
+      throw new ApiError(400, `Order in status "${order.status}" can't be adjusted for a shortfall`);
+    }
+
+    let totalShortfallAmount = 0;
+
+    for (const { variantId, quantity } of shortfallItems) {
+      if (!variantId || !(quantity > 0)) {
+        throw new ApiError(400, "Each shortfall line needs a variantId and a quantity greater than zero");
+      }
+
+      const itemRows = await client.query(
+        `SELECT id, product_id, quantity, unit_price FROM order_items WHERE order_id = $1 AND variant_id = $2 ORDER BY quantity DESC`,
+        [orderId, variantId]
+      );
+      const onOrder = itemRows.rows.reduce((sum, r) => sum + r.quantity, 0);
+      if (quantity > onOrder) {
+        throw new ApiError(
+          400,
+          `Can't record a shortfall of ${quantity} — only ${onOrder} of that item were on this order in the first place`
+        );
+      }
+
+      let remaining = quantity;
+      const unitPrice = Number(itemRows.rows[0].unit_price);
+      const productId = itemRows.rows[0].product_id;
+      for (const row of itemRows.rows) {
+        if (remaining <= 0) break;
+        const take = Math.min(remaining, row.quantity);
+        if (take === row.quantity) {
+          await client.query(`DELETE FROM order_items WHERE id = $1`, [row.id]);
+        } else {
+          await client.query(`UPDATE order_items SET quantity = quantity - $1 WHERE id = $2`, [take, row.id]);
+        }
+        remaining -= take;
+      }
+
+      const amount = quantity * unitPrice;
+      totalShortfallAmount += amount;
+      await client.query(
+        `INSERT INTO order_shortfalls (order_id, product_id, variant_id, quantity, unit_price, amount, note, recorded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [orderId, productId, variantId, quantity, unitPrice, amount, note || null, actingUser.id]
+      );
+    }
+
+    const newTotal = Number(order.total_amount) - totalShortfallAmount;
+    await client.query(`UPDATE orders SET total_amount = $1, updated_at = now() WHERE id = $2`, [newTotal, orderId]);
+
+    await client.query("COMMIT");
+
+    const updatedOrder = await getOrderById(orderId);
+    const overpaidBy = Math.max(0, updatedOrder.payment.totalPaid - newTotal);
+    return { order: updatedOrder, overpaidBy };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function getOrderShortfalls(orderId) {
+  const result = await db.query(
+    `SELECT os.*, p.name AS product_name, pv.size AS variant_size, u.full_name AS recorded_by_name
+     FROM order_shortfalls os
+     JOIN products p ON p.id = os.product_id
+     JOIN product_variants pv ON pv.id = os.variant_id
+     JOIN users u ON u.id = os.recorded_by
+     WHERE os.order_id = $1
+     ORDER BY os.created_at DESC`,
+    [orderId]
+  );
+  return result.rows;
 }
 
 // Admin-only. Soft-deletes an order (never a hard DELETE — payments and
@@ -1155,6 +1258,7 @@ module.exports = {
   updateStatus,
   cancelOrder,
   editOrderItems,
+  recordOrderShortfall,
   deleteOrder,
   restoreOrder,
   listDeletedOrders,
