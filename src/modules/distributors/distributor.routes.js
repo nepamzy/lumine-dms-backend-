@@ -235,6 +235,37 @@ router.patch(
   })
 );
 
+// Admin moves a sales rep under a different parent distributor (or null to
+// make them independent). newDistributorId = null in the body means
+// "detach" — express parses a JSON null through fine, so no separate
+// "unassign" route needed.
+router.patch(
+  "/:id/reassign",
+  asyncHandler(async (req, res) => {
+    const rep = await service.reassignSalesRep(req.params.id, req.body.newDistributorId || null);
+    res.json({ success: true, data: rep });
+  })
+);
+
+// Cross-distributor monitoring + integrity tools — see the service-layer
+// comments on adminListAllSalesReps / auditHierarchyLinks for what these
+// are for and why neither the distributor nor the sales rep can see them.
+router.get(
+  "/sales-reps/all",
+  asyncHandler(async (req, res) => {
+    const reps = await service.adminListAllSalesReps();
+    res.json({ success: true, data: reps });
+  })
+);
+
+router.get(
+  "/hierarchy/audit",
+  asyncHandler(async (req, res) => {
+    const report = await service.auditHierarchyLinks();
+    res.json({ success: true, data: report });
+  })
+);
+
 router.get(
   "/:id/history",
   asyncHandler(async (req, res) => {

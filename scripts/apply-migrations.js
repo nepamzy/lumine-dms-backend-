@@ -14,6 +14,7 @@ const path = require("path");
 const PENDING_MIGRATIONS = [
   { file: "026_password_reset_otp.sql", table: "users", column: "reset_otp_hash" },
   { file: "027_distributor_hierarchy_and_subaccounts.sql", table: "distributors", column: "registered_by_distributor_id" },
+  { file: "028_push_subscriptions.sql", table: "push_subscriptions", column: "endpoint" },
 ];
 
 async function main() {

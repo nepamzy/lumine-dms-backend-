@@ -1,7 +1,7 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { reserveStockFEFO } = require("../products/product.service");
-const { notify, notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery, notifyPaymentSuccess } = require("../notifications/notification.service");
+const { notify, notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery, notifyPaymentSuccess, notifyAdminOrderPlaced } = require("../notifications/notification.service");
 
 function generateOrderNumber() {
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -13,7 +13,16 @@ const PRODUCTION_DELAY_HOURS = 48;
 // First-installment floors — only the FIRST successful payment on an order
 // needs to clear this; once it has, later top-ups can be any amount.
 const CUSTOMER_FIRST_PAYMENT_MIN_PERCENT = 60;
-const DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT = 85;
+// Distributor first-payment floor is graduated, not a flat constant — see
+// getDistributorFirstPaymentMinPercent below. Anyone whose distributor
+// account already existed before this update shipped is "old" and gets the
+// relaxed 65% floor immediately; anyone joining after it starts at the
+// stricter 85% and graduates down to 65% once they've completed 10 batches
+// of purchase (their own orders) on the platform.
+const NEW_DISTRIBUTOR_CUTOFF = new Date("2026-09-28T00:00:00Z");
+const NEW_DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT = 85;
+const OLD_DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT = 65;
+const NEW_DISTRIBUTOR_GRADUATION_ORDER_COUNT = 10;
 // Every buyer type — customer, distributor, or sales rep buying for
 // themselves — must reach 100% paid on every existing order before placing
 // another. Distributors previously got an 85% carve-out here, which is
@@ -282,18 +291,30 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
     // the exact same on-behalf-of ordering rights a sales rep already had,
     // for any customer assigned to them (however that assignment happened:
     // direct registration, referral, or auto-match).
+    //
+    // Admin is a separate case: they can place an order on behalf of ANY
+    // buyer — a customer, a true distributor restocking, or a sales rep's
+    // own order — with no assignment check at all. Admin's authority here
+    // isn't scoped to a hierarchy the way a distributor's on-behalf-of
+    // rights are; same "admin's word is authoritative for every user type"
+    // principle as validateAdminPaymentAmount.
     if (placedByUserId && placedByUserId !== buyerId) {
-      if (buyer.kind !== "customer") {
-        throw new ApiError(400, "Orders can only be placed on behalf of a customer");
-      }
-      const assignedCheck = await client.query(
-        `SELECT 1 FROM customer_profiles cp
-         JOIN distributors d ON d.id = cp.assigned_distributor_id
-         WHERE cp.user_id = $1 AND d.user_id = $2`,
-        [buyerId, placedByUserId]
-      );
-      if (assignedCheck.rows.length === 0) {
-        throw new ApiError(403, "You can only place orders for customers assigned to you");
+      const placerResult = await client.query("SELECT role FROM users WHERE id = $1", [placedByUserId]);
+      const placerIsAdmin = placerResult.rows[0]?.role === "admin";
+
+      if (!placerIsAdmin) {
+        if (buyer.kind !== "customer") {
+          throw new ApiError(400, "Orders can only be placed on behalf of a customer");
+        }
+        const assignedCheck = await client.query(
+          `SELECT 1 FROM customer_profiles cp
+           JOIN distributors d ON d.id = cp.assigned_distributor_id
+           WHERE cp.user_id = $1 AND d.user_id = $2`,
+          [buyerId, placedByUserId]
+        );
+        if (assignedCheck.rows.length === 0) {
+          throw new ApiError(403, "You can only place orders for customers assigned to you");
+        }
       }
     }
 
@@ -359,6 +380,7 @@ async function createOrder(buyerId, items, { placedByUserId } = {}) {
     // Notifications are fire-and-forget side effects — never let them
     // delay the response or roll back an already-committed order.
     notifyOrderCreated(fullOrder, buyer.id).catch(() => {});
+    notifyAdminOrderPlaced(fullOrder, fullOrder.customer_name).catch(() => {});
     if (distributorId) {
       db.query("SELECT user_id FROM distributors WHERE id = $1", [distributorId])
         .then((r) => {
@@ -396,7 +418,27 @@ async function getPaymentSummary(orderId, totalAmount) {
 // Shared validation for any payment attempt — used both by the (legacy)
 // manual logPayment and the real Paystack initialize flow. Throws if the
 // amount isn't allowed; returns nothing if it's fine.
-function validatePaymentAmount(order, amount) {
+// Graduated first-payment floor for a distributor buyer — see the constants
+// above for the policy. order.customer_id is the distributor's own user id
+// when this is their own order (buyerKind === "distributor").
+async function getDistributorFirstPaymentMinPercent(order) {
+  const distResult = await db.query(`SELECT created_at FROM distributors WHERE user_id = $1`, [order.customer_id]);
+  const dist = distResult.rows[0];
+  if (!dist || new Date(dist.created_at) < NEW_DISTRIBUTOR_CUTOFF) {
+    return OLD_DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT;
+  }
+
+  const countResult = await db.query(
+    `SELECT COUNT(*) FROM orders WHERE customer_id = $1 AND id != $2 AND status != 'cancelled' AND deleted_at IS NULL`,
+    [order.customer_id, order.id]
+  );
+  const batchesPurchased = Number(countResult.rows[0].count);
+  return batchesPurchased >= NEW_DISTRIBUTOR_GRADUATION_ORDER_COUNT
+    ? OLD_DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT
+    : NEW_DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT;
+}
+
+async function validatePaymentAmount(order, amount) {
   if (!(amount > 0)) throw new ApiError(400, "Payment amount must be greater than zero");
   if (order.payment.totalPaid >= Number(order.total_amount)) {
     throw new ApiError(400, "This order is already fully paid");
@@ -422,12 +464,15 @@ function validatePaymentAmount(order, amount) {
 
   // Customers and distributors can both pay in installments, but the FIRST
   // successful payment on the order must clear a minimum floor (60% for a
-  // customer, 85% for a distributor) — once that's in, later top-ups can be
-  // any amount at all, no floor applies to them.
+  // customer, graduated 65-85% for a distributor — see
+  // getDistributorFirstPaymentMinPercent) — once that's in, later top-ups
+  // can be any amount at all, no floor applies to them.
   const isFirstPayment = order.payment.totalPaid === 0;
   if (isFirstPayment && !wouldCompleteOrder && order.buyerKind !== "salesRepSelf") {
     const minPercent =
-      order.buyerKind === "distributor" ? DISTRIBUTOR_FIRST_PAYMENT_MIN_PERCENT : CUSTOMER_FIRST_PAYMENT_MIN_PERCENT;
+      order.buyerKind === "distributor"
+        ? await getDistributorFirstPaymentMinPercent(order)
+        : CUSTOMER_FIRST_PAYMENT_MIN_PERCENT;
     const minPayment = (minPercent / 100) * Number(order.total_amount);
     if (Number(amount) < minPayment) {
       throw new ApiError(
@@ -500,7 +545,20 @@ async function getOrderById(id, { includeDeleted = false } = {}) {
   const expiry = getExpiryInfo(order.expiry_date);
   const paymentDue = getPaymentDueInfo({ ...order, payment });
 
-  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry, paymentDue };
+  // Surfaced so the frontend's "your first payment must be at least X%"
+  // hint stays accurate under the graduated distributor floor (old
+  // distributor vs new-and-not-yet-graduated) instead of a hardcoded 85%.
+  // Only computed when it'd actually be shown — no payment landed yet.
+  let firstPaymentMinPercent = null;
+  if (payment.totalPaid === 0) {
+    if (buyerKind === "distributor") {
+      firstPaymentMinPercent = await getDistributorFirstPaymentMinPercent(order);
+    } else if (buyerKind === "customer") {
+      firstPaymentMinPercent = CUSTOMER_FIRST_PAYMENT_MIN_PERCENT;
+    }
+  }
+
+  return { ...order, items: itemsResult.rows, payment, stage, buyerKind, expiry, paymentDue, firstPaymentMinPercent };
 }
 
 // Customers see only their own orders; distributors see only assigned orders; admins see all

@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { getOrderById, validatePaymentAmount, markPaidInFull } = require("../orders/order.service");
-const { notifyPaymentSuccess } = require("../notifications/notification.service");
+const { notifyPaymentSuccess, notifyAdminPaymentReceived } = require("../notifications/notification.service");
 const { paystackClient } = require("../../config/paystack");
 
 // Paystack Nigeria's standard fee schedule (local cards/bank transfer):
@@ -53,7 +53,7 @@ async function initializePaystackPayment(orderId, amount, buyer) {
   if (order.customer_id !== buyer.id) {
     throw new ApiError(403, "This isn't your order");
   }
-  validatePaymentAmount(order, amount);
+  await validatePaymentAmount(order, amount);
 
   // If this order's buyer chain belongs to a true distributor, this payment
   // must split 100% to that distributor's Paystack subaccount (0% to main —
@@ -237,6 +237,7 @@ async function confirmPaystackPayment(reference, { attempts = VERIFY_MAX_ATTEMPT
       await markPaidInFull(payment.order_id);
     }
     notifyPaymentSuccess(order, order.customer_id).catch(() => {});
+    notifyAdminPaymentReceived(order, payment.amount).catch(() => {});
     return { order, paymentStatus: "successful" };
   }
 

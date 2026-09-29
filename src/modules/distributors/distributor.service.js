@@ -342,12 +342,120 @@ async function changeDistributorType(distributorId, distributorType) {
   if (!["sales_rep", "distributor"].includes(distributorType)) {
     throw new ApiError(400, "distributorType must be 'sales_rep' or 'distributor'");
   }
+  // Guard against orphaning: flipping a true distributor DOWN to sales_rep
+  // while they still have sales reps registered under them would leave
+  // those reps pointing at a registered_by_distributor_id that's no
+  // longer a true distributor — a broken link nothing else here checks
+  // for. Block it with a clear reason instead; admin can reassign those
+  // reps elsewhere first (reassignSalesRep below) if this is really wanted.
+  if (distributorType === "sales_rep") {
+    const childReps = await db.query(
+      `SELECT COUNT(*) FROM distributors WHERE registered_by_distributor_id = $1`,
+      [distributorId]
+    );
+    if (Number(childReps.rows[0].count) > 0) {
+      throw new ApiError(
+        400,
+        `Can't change this to Sales Rep — they still have ${childReps.rows[0].count} sales rep(s) registered under them. Reassign those first.`
+      );
+    }
+  }
   const result = await db.query(
     `UPDATE distributors SET distributor_type = $1 WHERE id = $2 RETURNING *`,
     [distributorType, distributorId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "Distributor not found");
   return result.rows[0];
+}
+
+// Admin moves a sales rep to a different parent distributor (or to null,
+// making them independent — self-registered-but-unaffiliated). Distinct
+// from reassignCustomerDistributor in customer.service.js, which does the
+// same thing one level down (a customer between distributors/reps).
+async function reassignSalesRep(salesRepDistributorId, newParentDistributorId) {
+  const repResult = await db.query("SELECT id, distributor_type FROM distributors WHERE id = $1", [
+    salesRepDistributorId,
+  ]);
+  if (repResult.rows.length === 0) throw new ApiError(404, "Sales rep not found");
+  if (repResult.rows[0].distributor_type !== "sales_rep") {
+    throw new ApiError(400, "Only a sales rep account can be reassigned to a distributor this way");
+  }
+
+  if (newParentDistributorId) {
+    if (newParentDistributorId === salesRepDistributorId) {
+      throw new ApiError(400, "A sales rep can't be their own parent distributor");
+    }
+    const parentResult = await db.query("SELECT id, distributor_type FROM distributors WHERE id = $1", [
+      newParentDistributorId,
+    ]);
+    if (parentResult.rows.length === 0) throw new ApiError(404, "Target distributor not found");
+    if (parentResult.rows[0].distributor_type !== "distributor") {
+      throw new ApiError(400, "Target must be a true distributor, not another sales rep");
+    }
+  }
+
+  const result = await db.query(
+    `UPDATE distributors SET registered_by_distributor_id = $1 WHERE id = $2 RETURNING *`,
+    [newParentDistributorId || null, salesRepDistributorId]
+  );
+  return result.rows[0];
+}
+
+// Data-integrity sweep for the distributor→sales-rep→customer hierarchy —
+// surfaces links that are structurally valid (the foreign keys guarantee
+// that much) but functionally broken: a customer or sales rep still
+// pointing at a distributor whose account has since been removed or
+// suspended. Nothing here auto-fixes anything — distributors are meant to
+// run their own book their own way, so this is purely a "here's what needs
+// a human's attention" report for admin, via the existing reassignment
+// tools (reassignSalesRep above, reassignDistributor in customer.service).
+async function auditHierarchyLinks() {
+  const orphanedCustomers = await db.query(
+    `SELECT u.id, u.full_name, cp.assigned_distributor_id, du.full_name AS distributor_name, du.status AS distributor_status
+     FROM customer_profiles cp
+     JOIN users u ON u.id = cp.user_id
+     JOIN distributors d ON d.id = cp.assigned_distributor_id
+     JOIN users du ON du.id = d.user_id
+     WHERE u.deleted_at IS NULL AND u.role = 'customer' AND (du.deleted_at IS NOT NULL OR du.status = 'suspended')`
+  );
+  const orphanedSalesReps = await db.query(
+    `SELECT u.id, u.full_name, d.registered_by_distributor_id, pu.full_name AS parent_name, pu.status AS parent_status
+     FROM distributors d
+     JOIN users u ON u.id = d.user_id
+     JOIN distributors pd ON pd.id = d.registered_by_distributor_id
+     JOIN users pu ON pu.id = pd.user_id
+     WHERE u.deleted_at IS NULL AND d.registered_by_distributor_id IS NOT NULL
+       AND (pu.deleted_at IS NOT NULL OR pu.status = 'suspended' OR pd.distributor_type != 'distributor')`
+  );
+  return { orphanedCustomers: orphanedCustomers.rows, orphanedSalesReps: orphanedSalesReps.rows };
+}
+
+// Flat, cross-distributor monitoring view for admin — every sales rep on
+// the platform in one list (parent distributor name included), regardless
+// of which distributor they're under, so admin doesn't have to open each
+// distributor's modal one at a time to spot a rep who's underperforming or
+// worth a closer look. Purely a read — same as adminListHierarchySalesReps,
+// this is an admin-only endpoint the distributor or rep has no visibility
+// into at all; nothing in their own dashboards calls or reflects this.
+async function adminListAllSalesReps() {
+  const result = await db.query(
+    `SELECT d.id, u.full_name, u.email, u.phone, d.business_name, d.approval_status, u.status AS user_status,
+            d.registered_by_distributor_id, pu.full_name AS parent_distributor_name,
+            (SELECT COUNT(*) FROM customer_profiles cp WHERE cp.assigned_distributor_id = d.id) AS customer_count,
+            COALESCE(
+              (SELECT SUM(op.amount) FROM order_payments op
+               JOIN orders o ON o.id = op.order_id
+               WHERE o.distributor_id = d.id AND op.status = 'successful'),
+              0
+            ) AS total_revenue
+     FROM distributors d
+     JOIN users u ON u.id = d.user_id
+     LEFT JOIN distributors pd ON pd.id = d.registered_by_distributor_id
+     LEFT JOIN users pu ON pu.id = pd.user_id
+     WHERE d.distributor_type = 'sales_rep' AND u.deleted_at IS NULL
+     ORDER BY total_revenue DESC`
+  );
+  return result.rows;
 }
 
 async function listTerritories() {
@@ -837,6 +945,9 @@ module.exports = {
   rejectDistributor,
   suspendDistributor,
   changeDistributorType,
+  reassignSalesRep,
+  auditHierarchyLinks,
+  adminListAllSalesReps,
   listTerritories,
   createTerritory,
   getReferralInfo,

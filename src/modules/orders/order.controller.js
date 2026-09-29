@@ -3,13 +3,21 @@ const ApiError = require("../../utils/ApiError");
 const orderService = require("./order.service");
 
 const createHandler = asyncHandler(async (req, res) => {
-  const { items, customerId } = req.body;
-  // Sales reps place orders on behalf of a customer (customerId in body);
-  // everyone else (a customer buying for themselves, or a true distributor
-  // buying for themselves) just buys as req.user.
-  const buyerId = req.user.role === "distributor" && customerId ? customerId : req.user.id;
-  const placedByUserId = buyerId !== req.user.id ? req.user.id : undefined;
-  const order = await orderService.createOrder(buyerId, items, { placedByUserId });
+  const { items, customerId, buyerId } = req.body;
+  // Sales reps / true distributors place orders on behalf of a customer
+  // (customerId in body, checked against their own assignment in
+  // order.service.js). Admin can place an order on behalf of ANY buyer —
+  // most commonly a true distributor's own restock order — via buyerId;
+  // order.service.js only honors that when the placer's role is admin.
+  // Everyone else just buys as req.user.
+  let resolvedBuyerId = req.user.id;
+  if (req.user.role === "distributor" && customerId) {
+    resolvedBuyerId = customerId;
+  } else if (req.user.role === "admin" && buyerId) {
+    resolvedBuyerId = buyerId;
+  }
+  const placedByUserId = resolvedBuyerId !== req.user.id ? req.user.id : undefined;
+  const order = await orderService.createOrder(resolvedBuyerId, items, { placedByUserId });
   res.status(201).json({ success: true, data: order });
 });
 

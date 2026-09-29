@@ -185,6 +185,29 @@ async function register({ fullName, email, phone, password, role, state, latitud
     }
 
     await client.query("COMMIT");
+
+    // Fire-and-forget — admin gets an FYI/approval-needed email for every
+    // new signup, regardless of role. Never allowed to affect the response
+    // (notify() already swallows its own errors; this catch covers the
+    // lookup query above it too).
+    (async () => {
+      let registeredByName = null;
+      if (registeredByDistributorId) {
+        const r = await db.query(
+          `SELECT bu.full_name FROM distributors bd JOIN users bu ON bu.id = bd.user_id WHERE bd.id = $1`,
+          [registeredByDistributorId]
+        );
+        registeredByName = r.rows[0]?.full_name || null;
+      }
+      await notificationService.notifyAdminNewSignup({
+        role,
+        distributorType: role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : undefined,
+        fullName,
+        autoApproved: Boolean(registeredByDistributorId),
+        registeredByName,
+      });
+    })().catch((err) => console.error("Admin new-signup notification failed:", err.message));
+
     return user;
   } catch (err) {
     await client.query("ROLLBACK");
