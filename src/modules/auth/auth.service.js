@@ -206,7 +206,16 @@ async function register({ fullName, email, phone, password, role, state, latitud
         autoApproved: Boolean(registeredByDistributorId),
         registeredByName,
       });
-    })().catch((err) => console.error("Admin new-signup notification failed:", err.message));
+      // And a welcome email to the person who actually signed up — separate
+      // audience/copy from the admin FYI just above.
+      await notificationService.notifyWelcome({
+        userId: user.id,
+        role,
+        distributorType: role === "distributor" ? (extra.distributorType === "distributor" ? "distributor" : "sales_rep") : undefined,
+        fullName,
+        autoApproved: Boolean(registeredByDistributorId) || role === "customer",
+      });
+    })().catch((err) => console.error("Signup notification failed:", err.message));
 
     return user;
   } catch (err) {
@@ -454,7 +463,14 @@ async function forgotPassword(email) {
   // Sent to every contact method on file — email and SMS both, if the
   // account has both — always the same code either way.
   if (user.email) {
-    await notificationService.notify({ userId: user.id, type: "password_reset", channel: "email", message });
+    await notificationService.notify({
+      userId: user.id,
+      type: "password_reset",
+      channel: "email",
+      title: "🔐 Your password reset code",
+      message,
+      highlight: { label: "Reset Code", value: code },
+    });
   }
   if (user.phone) {
     await notificationService.notify({ userId: user.id, type: "password_reset", channel: "sms", message });

@@ -1,6 +1,6 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
-const { notifyDistributorApproved, notify } = require("../notifications/notification.service");
+const { notifyDistributorApproved, notifyDistributorRejected, notify } = require("../notifications/notification.service");
 const { paystackClient } = require("../../config/paystack");
 
 // Lazily required to avoid a require-cycle at module-load time (auth.service
@@ -302,6 +302,7 @@ async function rejectDistributor(distributorId) {
     [distributorId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "Distributor not found");
+  notifyDistributorRejected(result.rows[0].user_id).catch(() => {});
   return result.rows[0];
 }
 

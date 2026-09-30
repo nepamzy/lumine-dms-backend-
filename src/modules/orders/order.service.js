@@ -1,7 +1,7 @@
 const db = require("../../config/db");
 const ApiError = require("../../utils/ApiError");
 const { reserveStockFEFO } = require("../products/product.service");
-const { notify, notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery, notifyPaymentSuccess, notifyAdminOrderPlaced } = require("../notifications/notification.service");
+const { notify, notifyOrderCreated, notifyDistributorAssigned, notifyOutForDelivery, notifyPaymentSuccess, notifyAdminOrderPlaced, notifyOrderCancelled, notifyOrderEdited, notifyShortfallRecorded } = require("../notifications/notification.service");
 
 function generateOrderNumber() {
   const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
@@ -696,6 +696,7 @@ async function cancelOrder(orderId, actingUser) {
     );
 
     await client.query("COMMIT");
+    notifyOrderCancelled(order, order.customer_id).catch(() => {});
     return result.rows[0];
   } catch (err) {
     await client.query("ROLLBACK");
@@ -783,7 +784,9 @@ async function editOrderItems(orderId, items, actingUser) {
     );
 
     await client.query("COMMIT");
-    return getOrderById(orderId);
+    const updated = await getOrderById(orderId);
+    notifyOrderEdited(updated, updated.customer_id).catch(() => {});
+    return updated;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -872,6 +875,7 @@ async function recordOrderShortfall(orderId, shortfallItems, actingUser, note) {
 
     const updatedOrder = await getOrderById(orderId);
     const overpaidBy = Math.max(0, updatedOrder.payment.totalPaid - newTotal);
+    notifyShortfallRecorded(updatedOrder, updatedOrder.customer_id, overpaidBy).catch(() => {});
     return { order: updatedOrder, overpaidBy };
   } catch (err) {
     await client.query("ROLLBACK");
