@@ -720,13 +720,17 @@ async function editOrderItems(orderId, items, actingUser) {
   try {
     await client.query("BEGIN");
 
+    // FOR UPDATE OF o — not a bare FOR UPDATE — because Postgres refuses to
+    // lock rows from the nullable side of an outer join, and d (a buyer who
+    // isn't a distributor has no matching row there) is exactly that. Only
+    // the orders row actually needs locking here anyway.
     const orderResult = await client.query(
       `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type
        FROM orders o
        JOIN users u ON u.id = o.customer_id
        LEFT JOIN distributors d ON d.user_id = u.id
        WHERE o.id = $1
-       FOR UPDATE`,
+       FOR UPDATE OF o`,
       [orderId]
     );
     if (orderResult.rows.length === 0) throw new ApiError(404, "Order not found");
