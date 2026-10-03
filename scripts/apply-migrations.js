@@ -2,12 +2,17 @@
 // Added because this project's Render plan doesn't include Shell access to
 // run migrations by hand the normal way (node run-migration.js <URL> <file>,
 // same as every other numbered migration here). Safe to leave in place:
-// each entry is a no-op once the column it checks for already exists, and
-// the whole thing does nothing at all if DATABASE_URL isn't set (e.g. a
-// contributor's first `npm install` before .env is configured).
+// each entry is a no-op once it's already been applied, and the whole thing
+// does nothing at all if DATABASE_URL isn't set (e.g. a contributor's first
+// `npm install` before .env is configured).
 //
 // Add a new entry here whenever a migration needs to reach production and
-// Shell access still isn't available — same {file, table, column} shape.
+// Shell access still isn't available. Two idempotency check shapes:
+//   - { file, table, column } — schema migrations: skip once that column
+//     already exists.
+//   - { file, checkQuery } — pure data migrations (no new column to check
+//     for): skip once checkQuery returns a row. checkQuery should match
+//     something unique to the migration's END state, not its absence.
 const fs = require("fs");
 const path = require("path");
 
@@ -16,6 +21,14 @@ const PENDING_MIGRATIONS = [
   { file: "027_distributor_hierarchy_and_subaccounts.sql", table: "distributors", column: "registered_by_distributor_id" },
   { file: "028_push_subscriptions.sql", table: "push_subscriptions", column: "endpoint" },
   { file: "029_order_shortfalls.sql", table: "order_shortfalls", column: "quantity" },
+  {
+    // Distributor bulk-pricing retier (Oct 2026) — data-only, no new
+    // column. min_qty = 76 only exists under the new 5-tier structure
+    // (5/11/31/76/151); the previous structure (migration 016) topped out
+    // at 1/6/16/41/66, which never included 76.
+    file: "030_distributor_pricing_oct2026.sql",
+    checkQuery: "SELECT 1 FROM price_tiers WHERE min_qty = 76 LIMIT 1",
+  },
 ];
 
 async function main() {
@@ -33,10 +46,12 @@ async function main() {
   await client.connect();
   try {
     for (const migration of PENDING_MIGRATIONS) {
-      const result = await client.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
-        [migration.table, migration.column]
-      );
+      const result = migration.checkQuery
+        ? await client.query(migration.checkQuery)
+        : await client.query(
+            `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+            [migration.table, migration.column]
+          );
       if (result.rows.length > 0) {
         console.log(`[migrate] ${migration.file} already applied — skipping.`);
         continue;
