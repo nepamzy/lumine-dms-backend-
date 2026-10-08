@@ -9,14 +9,24 @@ async function sendSMS({ to, message }) {
     throw new Error("TERMII_API_KEY is not configured");
   }
 
-  await axios.post("https://api.ng.termii.com/api/sms/send", {
-    api_key: process.env.TERMII_API_KEY,
-    to,
-    from: process.env.TERMII_SENDER_ID || "Lumine",
-    sms: message,
-    type: "plain",
-    channel: "generic",
-  });
+  try {
+    await axios.post("https://api.ng.termii.com/api/sms/send", {
+      api_key: process.env.TERMII_API_KEY,
+      to,
+      from: process.env.TERMII_SENDER_ID || "Lumine",
+      sms: message,
+      type: "plain",
+      channel: "generic",
+    });
+  } catch (err) {
+    // Termii puts the actual rejection reason (bad key, no balance, sender
+    // ID not registered, etc.) in the response body — axios's own
+    // err.message is just "Request failed with status code 401", which
+    // every notify() caller logs verbatim and gives no way to tell those
+    // reasons apart. Surface the body so that log line is actionable.
+    const detail = err.response?.data?.message || JSON.stringify(err.response?.data) || err.message;
+    throw new Error(`Termii SMS send failed: ${detail}`);
+  }
 }
 
 module.exports = { sendSMS };
