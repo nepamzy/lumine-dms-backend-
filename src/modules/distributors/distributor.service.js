@@ -871,10 +871,10 @@ async function getTargetOverviewForRep(distributorId, year, month) {
   };
 }
 
-// Sends an SMS nudging a customer to complete payment on an order — the
-// sales rep's "Ping" action in Track Record. Reuses the existing generic
-// notify() (same Termii SMS path every other notification already goes
-// through), so it needs no new provider code.
+// Nudges a customer to complete payment on an order — the sales rep's
+// "Ping" action in Track Record. Reuses the existing generic notify();
+// channel "email" falls back to SMS automatically for a phone-only
+// customer (same effectiveChannel logic every other notification uses).
 async function pingCustomer(userId, customerId, orderId) {
   const distributorId = await requireSalesRepDistributorId(userId);
 
@@ -890,7 +890,7 @@ async function pingCustomer(userId, customerId, orderId) {
   await notify({
     userId: customerId,
     type: "payment_reminder",
-    channel: "sms",
+    channel: "email",
     message: `Hi ${customerResult.rows[0].full_name}, this is Lumine. You have an outstanding balance on order ${orderResult.rows[0].order_number}. Please complete payment soon to keep your account in good standing. Thank you!`,
   });
 }

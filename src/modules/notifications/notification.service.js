@@ -116,7 +116,7 @@ async function notifyOutForDelivery(order, customerId) {
   return notify({
     userId: customerId,
     type: "out_for_delivery",
-    channel: "sms",
+    channel: "email",
     title: "🚚 Out for delivery",
     message: `Your Lumine order ${order.order_number} is out for delivery. Track it in your dashboard.`,
     ctaUrl: `${APP_URL}/orders/${order.id}`,
@@ -187,7 +187,7 @@ async function notifyDistributorAssigned(orderNumber, distributorUserId) {
   return notify({
     userId: distributorUserId,
     type: "new_assignment",
-    channel: "sms",
+    channel: "email",
     title: "New order assigned",
     message: `New order ${orderNumber} has been assigned to you on Lumine DMS.`,
     ctaUrl: `${APP_URL}/dashboard`,
