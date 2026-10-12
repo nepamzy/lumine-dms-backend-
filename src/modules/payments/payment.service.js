@@ -105,6 +105,16 @@ async function initializePaystackPayment(orderId, amount, buyer) {
   try {
     response = await paystackClient().post("/transaction/initialize", initPayload);
   } catch (err) {
+    // Previously swallowed entirely — every failed payment attempt showed
+    // the same generic message with zero trace of why, server-side. Log
+    // Paystack's actual response body (invalid key, bad subaccount code,
+    // disabled channel, etc.) so a real outage is diagnosable instead of
+    // indistinguishable from a transient blip.
+    console.error(
+      "Paystack /transaction/initialize failed:",
+      err.response?.status,
+      JSON.stringify(err.response?.data) || err.message
+    );
     throw new ApiError(502, "Could not start payment with Paystack. Please try again.");
   }
 
