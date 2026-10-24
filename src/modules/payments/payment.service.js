@@ -86,8 +86,16 @@ async function initializePaystackPayment(orderId, amount, buyer) {
   const reference = generateReference();
   const amountInKobo = Math.round(chargeAmount * 100);
 
+  // Paystack rejects /transaction/initialize outright ("Email Address is
+  // required") with no email at all — confirmed in production logs as the
+  // actual cause behind "Could not start payment" reports, hitting every
+  // phone-only customer (email is optional on that signup path). Paystack
+  // only checks the field is present and email-shaped, never that it's
+  // deliverable, so a stable placeholder under the reserved .invalid TLD
+  // (RFC 2606 — guaranteed to never be a real, deliverable domain) clears
+  // the check without implying we'll actually email this address.
   const initPayload = {
-    email: buyer.email,
+    email: buyer.email || `customer-${buyer.id}@lumine.invalid`,
     amount: amountInKobo,
     reference,
     callback_url: `${process.env.CLIENT_URL}/orders/${orderId}?paystack_ref=${reference}`,
