@@ -306,28 +306,17 @@ async function isPushSubscribed(userId, endpoint) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// One-time catch-up: re-fires a push for every signup, order, and payment
-// Lumine has ever recorded, to the browser calling this (not every admin —
-// just whoever's logged in and clicked the button). Reads straight from
-// users/orders/order_payments rather than the notifications log, so it's
-// complete even for events from before push (or the notification system
-// generally) was working correctly — the first version of this only
-// replayed what the notifications table already had, which undercounted
-// for exactly that reason.
-//
-// Each push needs its own `tag` — browser notifications with the same tag
-// silently replace one another instead of stacking. Titles/messages are
-// built to read as a normal, fresh notification for that event (matching
-// notifyAdminNewSignup/notifyAdminOrderPlaced/notifyAdminPaymentReceived's
-// own copy), not a mechanical "Admin Order Placed" from the raw type name.
-//
-// Runs in the background, not awaited by the route handler: at ~200
-// events paced out, this easily outlives an HTTP request/proxy timeout.
-// Paced ~350ms apart — sending a large burst essentially simultaneously is
-// the suspected reason an earlier, unpaced version of this delivered only
-// a fraction of what it sent (likely throttled/collapsed by the push
-// service or the OS, not a bug in which rows were queried).
-async function replayFullAdminHistory(userId) {
+// Shared by both one-time replay actions below (push to an admin device,
+// email to the support inbox) — reads straight from users/orders/
+// order_payments rather than the notifications log, so it's complete even
+// for events from before push (or the notification system generally) was
+// working correctly; the first version of the push replay only replayed
+// what the notifications table already had, which undercounted for
+// exactly that reason. Titles/bodies are built to read as a normal, fresh
+// notification for that event (matching notifyAdminNewSignup/
+// notifyAdminOrderPlaced/notifyAdminPaymentReceived's own copy), not a
+// mechanical "Admin Order Placed" from a raw type name.
+async function collectAllHistoryEvents() {
   const [signups, orders, payments] = await Promise.all([
     db.query(
       `SELECT u.id, u.full_name, u.role, u.created_at, d.distributor_type
@@ -379,11 +368,58 @@ async function replayFullAdminHistory(userId) {
     });
   }
   events.sort((a, b) => new Date(a.at) - new Date(b.at));
+  return events;
+}
+
+// One-time catch-up: re-fires a push for every signup, order, and payment
+// Lumine has ever recorded, to the browser calling this (not every admin —
+// just whoever's logged in and clicked the button).
+//
+// Each push needs its own `tag` — browser notifications with the same tag
+// silently replace one another instead of stacking.
+//
+// Runs in the background, not awaited by the route handler: at ~200
+// events paced out, this easily outlives an HTTP request/proxy timeout.
+// Paced ~350ms apart — sending a large burst essentially simultaneously is
+// the suspected reason an earlier, unpaced version of this delivered only
+// a fraction of what it sent (likely throttled/collapsed by the push
+// service or the OS, not a bug in which rows were queried).
+async function replayFullAdminHistory(userId) {
+  const events = await collectAllHistoryEvents();
 
   (async () => {
     for (const event of events) {
       await sendPushToUser(userId, event).catch(() => {});
       await sleep(350);
+    }
+  })();
+
+  return events.length;
+}
+
+// The website's published support inbox (Contact page / footer) — not a
+// real user account, so this goes through sendEmail directly rather than
+// notify()'s userId-based path. Same one-time catch-up as the push
+// replay, same events, different channel. Paced ~1s apart (gentler than
+// push — Brevo's API has its own per-second rate limits) and run in the
+// background for the same reason: ~200 emails easily outlives an HTTP
+// request/proxy timeout if awaited synchronously.
+const SUPPORT_INBOX = "bonchrissupport@gmail.com";
+
+async function emailAllHistoryToSupport() {
+  const events = await collectAllHistoryEvents();
+
+  (async () => {
+    for (const event of events) {
+      await sendEmail({
+        to: SUPPORT_INBOX,
+        subject: stripEmoji(event.title),
+        title: event.title,
+        message: event.body,
+        ctaLabel: "View in admin",
+        ctaUrl: event.url,
+      }).catch((err) => console.error("Support history-replay email failed:", err.message));
+      await sleep(1000);
     }
   })();
 
@@ -465,5 +501,6 @@ module.exports = {
   unsubscribeFromPush,
   isPushSubscribed,
   replayFullAdminHistory,
+  emailAllHistoryToSupport,
   VAPID_PUBLIC_KEY,
 };

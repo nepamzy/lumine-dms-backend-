@@ -58,6 +58,18 @@ router.post(
   })
 );
 
+// Same one-time catch-up, emailed to the site's published support inbox
+// instead of pushed to a device. Admin-only, same reasoning as above.
+router.post(
+  "/email/replay-support-history",
+  authenticate,
+  authorize("admin"),
+  asyncHandler(async (req, res) => {
+    const count = await notificationService.emailAllHistoryToSupport();
+    res.json({ success: true, data: { count } });
+  })
+);
+
 router.get(
   "/push/status",
   authenticate,
