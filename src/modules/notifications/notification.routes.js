@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { authenticate } = require("../../middleware/auth.middleware");
+const { authenticate, authorize } = require("../../middleware/auth.middleware");
 const asyncHandler = require("../../utils/asyncHandler");
 const notificationService = require("./notification.service");
 
@@ -40,6 +40,19 @@ router.post(
   asyncHandler(async (req, res) => {
     await notificationService.unsubscribeFromPush(req.body.endpoint);
     res.json({ success: true });
+  })
+);
+
+// One-time catch-up button for admin — re-pushes every order/signup alert
+// on record to whichever device is logged in and clicks it, never to
+// every admin automatically.
+router.post(
+  "/push/replay-admin-history",
+  authenticate,
+  authorize("admin"),
+  asyncHandler(async (req, res) => {
+    const count = await notificationService.replayAdminPushHistory(req.user.id);
+    res.json({ success: true, data: { count } });
   })
 );
 

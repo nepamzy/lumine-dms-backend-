@@ -304,6 +304,30 @@ async function isPushSubscribed(userId, endpoint) {
   return result.rows.length > 0;
 }
 
+// One-time catch-up: re-fires every admin_order_placed/admin_new_signup
+// push this admin has on record, to the browser calling this (not every
+// admin — just whoever's logged in and clicked the button). Each push
+// needs its own `tag` — browser notifications with the same tag silently
+// replace one another instead of stacking, so reusing `type` as the tag
+// here would collapse 29 order-placed pushes down to just the latest one.
+async function replayAdminPushHistory(userId) {
+  const result = await db.query(
+    `SELECT id, type, message, created_at FROM notifications
+     WHERE user_id = $1 AND type IN ('admin_order_placed', 'admin_new_signup')
+     ORDER BY created_at ASC`,
+    [userId]
+  );
+  for (const row of result.rows) {
+    await sendPushToUser(userId, {
+      title: humanizeType(row.type),
+      body: row.message,
+      url: row.type === "admin_new_signup" ? `${APP_URL}/admin/customers` : `${APP_URL}/admin/orders`,
+      tag: `replay-${row.id}`,
+    });
+  }
+  return result.rows.length;
+}
+
 // ---- Admin fan-out — every admin account gets a copy ----
 
 async function getAdminUserIds() {
@@ -378,5 +402,6 @@ module.exports = {
   subscribeToPush,
   unsubscribeFromPush,
   isPushSubscribed,
+  replayAdminPushHistory,
   VAPID_PUBLIC_KEY,
 };
