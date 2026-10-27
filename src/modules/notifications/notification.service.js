@@ -304,28 +304,90 @@ async function isPushSubscribed(userId, endpoint) {
   return result.rows.length > 0;
 }
 
-// One-time catch-up: re-fires every admin_order_placed/admin_new_signup
-// push this admin has on record, to the browser calling this (not every
-// admin — just whoever's logged in and clicked the button). Each push
-// needs its own `tag` — browser notifications with the same tag silently
-// replace one another instead of stacking, so reusing `type` as the tag
-// here would collapse 29 order-placed pushes down to just the latest one.
-async function replayAdminPushHistory(userId) {
-  const result = await db.query(
-    `SELECT id, type, message, created_at FROM notifications
-     WHERE user_id = $1 AND type IN ('admin_order_placed', 'admin_new_signup')
-     ORDER BY created_at ASC`,
-    [userId]
-  );
-  for (const row of result.rows) {
-    await sendPushToUser(userId, {
-      title: humanizeType(row.type),
-      body: row.message,
-      url: row.type === "admin_new_signup" ? `${APP_URL}/admin/customers` : `${APP_URL}/admin/orders`,
-      tag: `replay-${row.id}`,
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One-time catch-up: re-fires a push for every signup, order, and payment
+// Lumine has ever recorded, to the browser calling this (not every admin —
+// just whoever's logged in and clicked the button). Reads straight from
+// users/orders/order_payments rather than the notifications log, so it's
+// complete even for events from before push (or the notification system
+// generally) was working correctly — the first version of this only
+// replayed what the notifications table already had, which undercounted
+// for exactly that reason.
+//
+// Each push needs its own `tag` — browser notifications with the same tag
+// silently replace one another instead of stacking. Titles/messages are
+// built to read as a normal, fresh notification for that event (matching
+// notifyAdminNewSignup/notifyAdminOrderPlaced/notifyAdminPaymentReceived's
+// own copy), not a mechanical "Admin Order Placed" from the raw type name.
+//
+// Runs in the background, not awaited by the route handler: at ~200
+// events paced out, this easily outlives an HTTP request/proxy timeout.
+// Paced ~350ms apart — sending a large burst essentially simultaneously is
+// the suspected reason an earlier, unpaced version of this delivered only
+// a fraction of what it sent (likely throttled/collapsed by the push
+// service or the OS, not a bug in which rows were queried).
+async function replayFullAdminHistory(userId) {
+  const [signups, orders, payments] = await Promise.all([
+    db.query(
+      `SELECT u.id, u.full_name, u.role, u.created_at, d.distributor_type
+       FROM users u LEFT JOIN distributors d ON d.user_id = u.id
+       WHERE u.deleted_at IS NULL AND u.role != 'admin'
+       ORDER BY u.created_at ASC`
+    ),
+    db.query(
+      `SELECT o.id, o.order_number, o.total_amount, o.created_at, u.full_name AS buyer_name
+       FROM orders o JOIN users u ON u.id = o.customer_id
+       WHERE o.deleted_at IS NULL
+       ORDER BY o.created_at ASC`
+    ),
+    db.query(
+      `SELECT p.id, p.amount, p.recorded_at, o.order_number
+       FROM order_payments p JOIN orders o ON o.id = p.order_id
+       WHERE p.status = 'successful'
+       ORDER BY p.recorded_at ASC`
+    ),
+  ]);
+
+  const events = [];
+  for (const s of signups.rows) {
+    const kind = s.role === "customer" ? "Customer" : s.distributor_type === "distributor" ? "Distributor" : "Sales Rep";
+    events.push({
+      at: s.created_at,
+      tag: `replay-signup-${s.id}`,
+      title: `👤 New ${kind} signup`,
+      body: `${s.full_name} just signed up on Lumine as a ${kind}.`,
+      url: `${APP_URL}/admin/customers`,
     });
   }
-  return result.rows.length;
+  for (const o of orders.rows) {
+    events.push({
+      at: o.created_at,
+      tag: `replay-order-${o.id}`,
+      title: "📦 New order placed",
+      body: `${o.buyer_name} placed order ${o.order_number}.`,
+      url: `${APP_URL}/orders/${o.id}`,
+    });
+  }
+  for (const p of payments.rows) {
+    events.push({
+      at: p.recorded_at,
+      tag: `replay-payment-${p.id}`,
+      title: "✅ Payment received",
+      body: `A payment of ₦${Number(p.amount).toLocaleString()} came in for order ${p.order_number}.`,
+      url: `${APP_URL}/admin/orders`,
+    });
+  }
+  events.sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  (async () => {
+    for (const event of events) {
+      await sendPushToUser(userId, event).catch(() => {});
+      await sleep(350);
+    }
+  })();
+
+  return events.length;
 }
 
 // ---- Admin fan-out — every admin account gets a copy ----
@@ -402,6 +464,6 @@ module.exports = {
   subscribeToPush,
   unsubscribeFromPush,
   isPushSubscribed,
-  replayAdminPushHistory,
+  replayFullAdminHistory,
   VAPID_PUBLIC_KEY,
 };

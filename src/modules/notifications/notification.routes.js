@@ -43,15 +43,17 @@ router.post(
   })
 );
 
-// One-time catch-up button for admin — re-pushes every order/signup alert
-// on record to whichever device is logged in and clicks it, never to
-// every admin automatically.
+// One-time catch-up button for admin — re-pushes a notification for every
+// signup, order, and payment Lumine has ever recorded, to whichever device
+// is logged in and clicks it, never to every admin automatically. Sending
+// is paced and happens after this responds (see replayFullAdminHistory),
+// so `count` here is how many are queued, not yet how many have arrived.
 router.post(
   "/push/replay-admin-history",
   authenticate,
   authorize("admin"),
   asyncHandler(async (req, res) => {
-    const count = await notificationService.replayAdminPushHistory(req.user.id);
+    const count = await notificationService.replayFullAdminHistory(req.user.id);
     res.json({ success: true, data: { count } });
   })
 );
