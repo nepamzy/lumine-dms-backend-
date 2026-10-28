@@ -45,6 +45,22 @@ function generateReference() {
 // redirected to. Nothing counts as paid until confirmPaystackPayment
 // confirms it — this just opens the attempt.
 async function initializePaystackPayment(orderId, amount, buyer) {
+  // Temporary switch while a Paystack settlement issue is being sorted out
+  // (see Oct 2026 payout delay) — stops NEW money from flowing into the
+  // same Paystack account until that's resolved, without touching
+  // anything else: verifyPaystackPayment/reconcile still work normally for
+  // whatever already went through before this was flipped on, and admin's
+  // manual logPayment (order.service.js, a completely separate path that
+  // never touches Paystack) is untouched, so admin can still record a
+  // payment arranged directly with the buyer. Flip PAYMENTS_UNDER_MAINTENANCE
+  // back off in Render's env vars once Paystack releases the held payouts.
+  if (process.env.PAYMENTS_UNDER_MAINTENANCE === "true") {
+    throw new ApiError(
+      503,
+      "Online payments are temporarily under maintenance. Please contact management to arrange a transfer of funds."
+    );
+  }
+
   if (!process.env.PAYSTACK_SECRET_KEY) {
     throw new ApiError(503, "Payments aren't connected yet — Paystack isn't configured. Contact support.");
   }
