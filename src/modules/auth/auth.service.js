@@ -136,10 +136,15 @@ async function register({ fullName, email, phone, password, role, state, latitud
       // recorded as who onboarded them, for the admin Orders split view and
       // per-distributor drilldown.
       const approvalStatus = registeredByDistributorId ? "approved" : "pending";
+      // approved_at anchors this rep's Target Overview cycles (see
+      // distributor.service.js) — set it here too, not just in
+      // approveDistributor, since an auto-approved rep never goes through
+      // that path at all.
+      const approvedAt = approvalStatus === "approved" ? new Date() : null;
       await client.query(
-        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code, distributor_type, registered_by_distributor_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [user.id, extra.territoryId || null, extra.businessName || null, approvalStatus, referralCode, distributorType, registeredByDistributorId || null]
+        `INSERT INTO distributors (user_id, territory_id, business_name, approval_status, referral_code, distributor_type, registered_by_distributor_id, approved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [user.id, extra.territoryId || null, extra.businessName || null, approvalStatus, referralCode, distributorType, registeredByDistributorId || null, approvedAt]
       );
     } else if (role === "customer") {
       // Referral link (?ref=CODE) takes priority. If the customer didn't come

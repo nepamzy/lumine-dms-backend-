@@ -272,8 +272,12 @@ async function approveDistributor(distributorId, territoryId) {
   try {
     await client.query("BEGIN");
 
+    // COALESCE(approved_at, now()) rather than a bare overwrite — approving
+    // twice (or re-approving after a suspend) shouldn't reset a sales rep's
+    // Target Overview cycle anchor to a new date.
     const distResult = await client.query(
-      `UPDATE distributors SET approval_status = 'approved', territory_id = COALESCE($1, territory_id)
+      `UPDATE distributors SET approval_status = 'approved', territory_id = COALESCE($1, territory_id),
+              approved_at = COALESCE(approved_at, now())
        WHERE id = $2 RETURNING *`,
       [territoryId || null, distributorId]
     );
@@ -837,20 +841,78 @@ async function adminListHierarchySalesReps(distributorId) {
   return _hierarchySalesRepsForDistId(distributorId);
 }
 
-// Admin-only. A sales rep's Target Overview for one calendar month: every
-// order that's been through the monthly sweep (moved_to_target_overview_at
-// set), credited to whichever month it actually reached 100% paid
-// (paid_in_full_at) -- not the month it was placed. Attribution is by
+// A sales rep's monthly target runs on THEIR OWN cycle — the same
+// day-of-month they were approved, not the calendar month — since reps get
+// approved all through the month, not just on the 1st. Adds `months`
+// calendar months to `date`, clamping the day instead of overflowing into
+// the following month (naive Date.UTC(y, m+1, 31) on a 30-day month rolls
+// into March, not to Feb's last day — that bug is exactly what this avoids).
+function addMonthsClamped(date, months) {
+  const h = date.getUTCHours(), mi = date.getUTCMinutes(), s = date.getUTCSeconds();
+  const targetFirst = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1, h, mi, s));
+  const daysInTargetMonth = new Date(Date.UTC(targetFirst.getUTCFullYear(), targetFirst.getUTCMonth() + 1, 0)).getUTCDate();
+  const clampedDay = Math.min(date.getUTCDate(), daysInTargetMonth);
+  return new Date(Date.UTC(targetFirst.getUTCFullYear(), targetFirst.getUTCMonth(), clampedDay, h, mi, s));
+}
+
+// Every cycle from a rep's approval date up to and including the one
+// containing `now` — cycle 0 is [approvedAt, approvedAt+1mo), cycle 1 is
+// [approvedAt+1mo, approvedAt+2mo), etc. Returned oldest-first.
+function buildApprovalCycles(approvedAt, now = new Date()) {
+  const anchor = new Date(approvedAt);
+  const cycles = [];
+  for (let i = 0; ; i++) {
+    const start = addMonthsClamped(anchor, i);
+    const end = addMonthsClamped(anchor, i + 1);
+    cycles.push({ index: i, start, end, isCurrent: start <= now && now < end });
+    if (now < end) break;
+  }
+  return cycles;
+}
+
+// Admin-only. The list of a sales rep's own monthly cycles (for the picker
+// that replaced the old shared year/month grid) plus which one is current.
+async function listRepCycles(distributorId) {
+  const result = await db.query(`SELECT approved_at FROM distributors WHERE id = $1`, [distributorId]);
+  if (result.rows.length === 0) throw new ApiError(404, "Sales rep not found");
+  if (!result.rows[0].approved_at) {
+    throw new ApiError(400, "This sales rep has no recorded approval date yet.");
+  }
+  return buildApprovalCycles(result.rows[0].approved_at);
+}
+
+// Real pack math, not bottle count or order count: orders are placed in
+// quarter-pack increments (24 bottles/pack for 35cl & 50cl, 12 for 1L —
+// must match order.service.js's QUARTER_PACK_UNITS/packSize), so a single
+// order_items row's `quantity` column is bottles, never packs on its own.
+const PACK_SIZE_SQL_CASE = `CASE WHEN pv.size = '1L' THEN 12.0 ELSE 24.0 END`;
+
+// Admin-only. A sales rep's Target Overview for one of THEIR OWN cycles
+// (see buildApprovalCycles — not a shared calendar month): every order
+// that's been through the monthly sweep (moved_to_target_overview_at set),
+// credited to whichever cycle it actually reached 100% paid
+// (paid_in_full_at) -- not when it was placed. Attribution is by
 // orders.distributor_id, frozen at order-creation time, same rule as
 // getCustomerHistoryForRep above -- a rep keeps credit for a sale even if
 // the customer is later reassigned to someone else.
-async function getTargetOverviewForRep(distributorId, year, month) {
-  const monthStart = new Date(Date.UTC(year, month - 1, 1));
-  const monthEnd = new Date(Date.UTC(year, month, 1));
+//
+// Packs, not orders, are the real unit — a rep is paid per pack sold
+// (target: 30 packs/cycle), and one order can be anywhere from a quarter
+// pack to dozens, so counting orders as a proxy for packs (the previous
+// version of this) understated or overstated every rep's actual number.
+async function getTargetOverviewForRep(distributorId, cycleIndex) {
+  const cycles = await listRepCycles(distributorId);
+  const cycle = cycles[cycleIndex];
+  if (!cycle) throw new ApiError(400, "That cycle doesn't exist for this sales rep yet.");
 
-  const result = await db.query(
+  const ordersResult = await db.query(
     `SELECT o.id, o.order_number, o.total_amount, o.paid_in_full_at, o.created_at,
-            u.full_name AS customer_name, cp.business_name AS customer_business_name
+            u.full_name AS customer_name, cp.business_name AS customer_business_name,
+            COALESCE((
+              SELECT SUM(oi.quantity / ${PACK_SIZE_SQL_CASE})
+              FROM order_items oi JOIN product_variants pv ON pv.id = oi.variant_id
+              WHERE oi.order_id = o.id
+            ), 0) AS packs
      FROM orders o
      JOIN users u ON u.id = o.customer_id
      LEFT JOIN customer_profiles cp ON cp.user_id = o.customer_id
@@ -859,15 +921,17 @@ async function getTargetOverviewForRep(distributorId, year, month) {
        AND o.paid_in_full_at >= $2 AND o.paid_in_full_at < $3
        AND o.deleted_at IS NULL
      ORDER BY o.paid_in_full_at DESC`,
-    [distributorId, monthStart, monthEnd]
+    [distributorId, cycle.start, cycle.end]
   );
 
-  const orders = result.rows;
+  const orders = ordersResult.rows.map((o) => ({ ...o, packs: Number(o.packs) }));
   const totalRevenue = orders.reduce((sum, o) => sum + Number(o.total_amount), 0);
+  const totalPacks = orders.reduce((sum, o) => sum + o.packs, 0);
 
   return {
+    cycle,
     orders,
-    summary: { totalOrders: orders.length, totalRevenue },
+    summary: { totalOrders: orders.length, totalPacks, totalRevenue },
   };
 }
 
@@ -957,6 +1021,7 @@ module.exports = {
   listTrackRecordCustomers,
   getCustomerHistoryForRep,
   getTargetOverviewForRep,
+  listRepCycles,
   pingCustomer,
   removeDistributor,
   listTrash,

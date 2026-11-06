@@ -294,13 +294,24 @@ router.get(
   })
 );
 
+// A sales rep's own approval-anchored cycles (e.g. "15th to 14th"), for
+// the picker that replaced the old shared year/month grid.
+router.get(
+  "/:id/target-overview/cycles",
+  asyncHandler(async (req, res) => {
+    const cycles = await service.listRepCycles(req.params.id);
+    res.json({ success: true, data: cycles });
+  })
+);
+
 router.get(
   "/:id/target-overview",
   asyncHandler(async (req, res) => {
-    const year = Number(req.query.year);
-    const month = Number(req.query.month);
-    if (!year || !month) throw new ApiError(400, "year and month are required");
-    const data = await service.getTargetOverviewForRep(req.params.id, year, month);
+    const cycleIndex = Number(req.query.cycle);
+    if (!Number.isInteger(cycleIndex) || cycleIndex < 0) {
+      throw new ApiError(400, "A valid cycle index is required");
+    }
+    const data = await service.getTargetOverviewForRep(req.params.id, cycleIndex);
     res.json({ success: true, data });
   })
 );

@@ -29,6 +29,7 @@ const PENDING_MIGRATIONS = [
     file: "030_distributor_pricing_oct2026.sql",
     checkQuery: "SELECT 1 FROM price_tiers WHERE min_qty = 76 LIMIT 1",
   },
+  { file: "031_sales_rep_approval_cycles.sql", table: "distributors", column: "approved_at" },
 ];
 
 async function main() {
