@@ -300,13 +300,24 @@ async function userTotals() {
 // Overview revenue chart plots. Only months with at least one successful
 // payment appear; there's no artificial window, so this naturally grows
 // as the business does.
+//
+// Must match salesReport()'s summary.total_revenue definition exactly —
+// AND o.status != 'cancelled' here is the same filter that query applies,
+// missing in an earlier version of this function. Confirmed against
+// production: without it, this summed to ₦4,478,000 against the real
+// ₦4,040,000 total — the gap being payments recorded against orders that
+// were later cancelled, which salesReport correctly excludes and this one
+// didn't. Both the Paystack-confirmed path (payment.service.js) and
+// admin's manual logPayment (order.service.js) insert into the same
+// order_payments table with the same status='successful', so both are
+// already included here — that part needed no fix.
 async function monthlyRevenue() {
   const result = await db.query(
     `SELECT to_char(date_trunc('month', p.recorded_at), 'YYYY-MM') AS month,
             SUM(p.amount) AS revenue
      FROM order_payments p
      JOIN orders o ON o.id = p.order_id
-     WHERE p.status = 'successful' AND o.deleted_at IS NULL
+     WHERE p.status = 'successful' AND o.deleted_at IS NULL AND o.status != 'cancelled'
      GROUP BY date_trunc('month', p.recorded_at)
      ORDER BY date_trunc('month', p.recorded_at) ASC`
   );
