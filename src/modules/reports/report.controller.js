@@ -54,4 +54,21 @@ const repRevenueHandler = asyncHandler(async (req, res) => {
   res.json({ success: true, data: rows });
 });
 
-module.exports = { salesHandler, inventoryHandler, deliveryHandler, repRevenueHandler };
+const userTotalsHandler = asyncHandler(async (req, res) => {
+  const totals = await reportService.userTotals();
+  res.json({ success: true, data: totals });
+});
+
+const monthlyRevenueHandler = asyncHandler(async (req, res) => {
+  const rows = await reportService.monthlyRevenue();
+  res.json({ success: true, data: rows });
+});
+
+module.exports = {
+  salesHandler,
+  inventoryHandler,
+  deliveryHandler,
+  repRevenueHandler,
+  userTotalsHandler,
+  monthlyRevenueHandler,
+};

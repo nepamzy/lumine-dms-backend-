@@ -272,4 +272,45 @@ async function repRevenueBreakdown({ startDate, endDate } = {}) {
   return result.rows;
 }
 
-module.exports = { salesReport, inventoryReport, deliveryReport, repRevenueBreakdown };
+// Headcount by role for the Overview "Total Users" tile — distributors and
+// sales reps are both stored as role='distributor' (distributor_type tells
+// them apart in the distributors table), so this needs the join rather
+// than a plain GROUP BY u.role.
+async function userTotals() {
+  const result = await db.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE u.role = 'customer') AS customers,
+       COUNT(*) FILTER (WHERE u.role = 'distributor' AND d.distributor_type = 'distributor') AS distributors,
+       COUNT(*) FILTER (WHERE u.role = 'distributor' AND d.distributor_type = 'sales_rep') AS sales_reps,
+       COUNT(*) FILTER (WHERE u.role = 'admin') AS admins
+     FROM users u
+     LEFT JOIN distributors d ON d.user_id = u.id
+     WHERE u.deleted_at IS NULL`
+  );
+  const row = result.rows[0];
+  const customers = Number(row.customers);
+  const distributors = Number(row.distributors);
+  const salesReps = Number(row.sales_reps);
+  const admins = Number(row.admins);
+  return { customers, distributors, salesReps, admins, total: customers + distributors + salesReps };
+}
+
+// Revenue actually collected per calendar month (grouped by when the
+// payment was recorded, not when the order was placed) — what the
+// Overview revenue chart plots. Only months with at least one successful
+// payment appear; there's no artificial window, so this naturally grows
+// as the business does.
+async function monthlyRevenue() {
+  const result = await db.query(
+    `SELECT to_char(date_trunc('month', p.recorded_at), 'YYYY-MM') AS month,
+            SUM(p.amount) AS revenue
+     FROM order_payments p
+     JOIN orders o ON o.id = p.order_id
+     WHERE p.status = 'successful' AND o.deleted_at IS NULL
+     GROUP BY date_trunc('month', p.recorded_at)
+     ORDER BY date_trunc('month', p.recorded_at) ASC`
+  );
+  return result.rows.map((r) => ({ month: r.month, revenue: Number(r.revenue) }));
+}
+
+module.exports = { salesReport, inventoryReport, deliveryReport, repRevenueBreakdown, userTotals, monthlyRevenue };
