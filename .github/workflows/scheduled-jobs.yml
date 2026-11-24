@@ -1,0 +1,54 @@
+# Replaces the two paid Render cron jobs (lumine-daily-batch and
+# lumine-monthly-sweep). Each just calls a backend endpoint with the shared
+# X-Cron-Secret. Requires the repo secret CRON_SECRET (same value as the
+# backend's CRON_SECRET env var on Render).
+#
+# Both endpoints are idempotent, so a retry or a manual re-run is safe.
+# GitHub may start scheduled runs a few minutes late; that's fine here.
+name: Scheduled jobs
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # daily batch — 00:00 UTC (1am Nigeria)
+    - cron: "5 0 1 * *"   # monthly sweep — 00:05 UTC on the 1st
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run manually"
+        required: true
+        type: choice
+        options:
+          - daily-batch
+          - monthly-sweep
+
+env:
+  BASE_URL: https://lumine-dms-backend.onrender.com
+
+jobs:
+  daily-batch:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'daily-batch' || github.event.schedule == '0 0 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run daily batch
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --show-error --silent \
+            --retry 5 --retry-delay 30 --retry-all-errors --max-time 120 \
+            -X POST "$BASE_URL/api/products/run-daily-batch" \
+            -H "X-Cron-Secret: $CRON_SECRET"
+
+  monthly-sweep:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'monthly-sweep' || github.event.schedule == '5 0 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run monthly sweep
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --show-error --silent \
+            --retry 5 --retry-delay 30 --retry-all-errors --max-time 120 \
+            -X POST "$BASE_URL/api/orders/run-monthly-sweep" \
+            -H "X-Cron-Secret: $CRON_SECRET"
