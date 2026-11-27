@@ -519,7 +519,7 @@ async function getOrderById(id, { includeDeleted = false } = {}) {
   const orderResult = await db.query(
     `SELECT o.*, u.role AS buyer_role, d.distributor_type AS buyer_distributor_type,
             u.full_name AS customer_name, u.email AS customer_email, u.phone AS customer_phone,
-            COALESCE(ad.business_name, adu.full_name) AS sales_rep_name, ad.distributor_type AS assigned_type
+            COALESCE(NULLIF(TRIM(ad.business_name), ''), adu.full_name) AS sales_rep_name, ad.distributor_type AS assigned_type
      FROM orders o
      JOIN users u ON u.id = o.customer_id
      LEFT JOIN distributors d ON d.user_id = u.id
@@ -623,7 +623,7 @@ async function listOrders(user, { status } = {}) {
   const result = await db.query(
     `SELECT o.*, u.full_name AS customer_name, u.state AS customer_state, u.role AS buyer_role,
             COALESCE(rud.business_name, rudu.full_name) AS registered_under_distributor_name,
-            COALESCE(ad.business_name, adu.full_name) AS sales_rep_name, ad.distributor_type AS assigned_type,
+            COALESCE(NULLIF(TRIM(ad.business_name), ''), adu.full_name) AS sales_rep_name, ad.distributor_type AS assigned_type,
             COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'), 0) AS paid_amount
      FROM orders o
      JOIN users u ON u.id = o.customer_id
