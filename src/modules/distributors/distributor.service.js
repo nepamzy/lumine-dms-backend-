@@ -290,7 +290,7 @@ async function approveDistributor(distributorId, territoryId) {
 
     await client.query("COMMIT");
 
-    notifyDistributorApproved(distResult.rows[0].user_id).catch(() => {});
+    notifyDistributorApproved(distResult.rows[0].user_id, distResult.rows[0].distributor_type).catch(() => {});
 
     return distResult.rows[0];
   } catch (err) {
@@ -306,7 +306,7 @@ async function rejectDistributor(distributorId) {
     [distributorId]
   );
   if (result.rows.length === 0) throw new ApiError(404, "Distributor not found");
-  notifyDistributorRejected(result.rows[0].user_id).catch(() => {});
+  notifyDistributorRejected(result.rows[0].user_id, result.rows[0].distributor_type).catch(() => {});
   return result.rows[0];
 }
 

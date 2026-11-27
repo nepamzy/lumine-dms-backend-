@@ -194,7 +194,8 @@ async function notifyDistributorAssigned(orderNumber, distributorUserId) {
   });
 }
 
-async function notifyDistributorApproved(distributorUserId) {
+async function notifyDistributorApproved(distributorUserId, distributorType) {
+  const isSalesRep = distributorType === "sales_rep";
   return notify({
     userId: distributorUserId,
     type: "distributor_approved",
@@ -202,21 +203,25 @@ async function notifyDistributorApproved(distributorUserId) {
     title: "🎉 You're approved!",
     accent: "green",
     message:
-      `Great news — your Lumine distributor account has been approved!\n\n` +
-      `You can now log in, start ordering stock, and bring on your own sales reps and customers. Welcome aboard.`,
+      isSalesRep
+        ? `Great news — your Lumine sales rep account has been approved!\n\n` +
+          `You can now log in, start bringing on customers and placing their orders. Welcome aboard.`
+        : `Great news — your Lumine distributor account has been approved!\n\n` +
+          `You can now log in, start ordering stock, and bring on your own sales reps and customers. Welcome aboard.`,
     ctaLabel: "Go to dashboard",
     ctaUrl: `${APP_URL}/dashboard`,
   });
 }
 
-async function notifyDistributorRejected(distributorUserId) {
+async function notifyDistributorRejected(distributorUserId, distributorType) {
+  const roleName = distributorType === "sales_rep" ? "sales rep" : "distributor";
   return notify({
     userId: distributorUserId,
     type: "distributor_rejected",
     channel: "email",
     title: "Update on your application",
     message:
-      `Thanks for your interest in becoming a Lumine distributor. After review, we're not able to approve your application at this time.\n\n` +
+      `Thanks for your interest in becoming a Lumine ${roleName}. After review, we're not able to approve your application at this time.\n\n` +
       `If you think this was a mistake or your circumstances have changed, feel free to reach out or apply again.`,
   });
 }

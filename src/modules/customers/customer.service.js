@@ -87,6 +87,7 @@ async function getCustomerHistory(customerUserId) {
     `SELECT o.id, o.order_number, o.status, o.total_amount, o.created_at,
             del.gps_status AS delivery_status,
             dd.business_name AS distributor_business_name, du.full_name AS distributor_full_name,
+            dd.distributor_type AS distributor_type,
             COALESCE(
               (SELECT SUM(amount) FROM order_payments WHERE order_id = o.id AND status = 'successful'),
               0
